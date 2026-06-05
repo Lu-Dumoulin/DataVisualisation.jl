@@ -21,7 +21,7 @@ Built on [Bonito](https://github.com/SimonDanisch/Bonito.jl) and [WGLMakie](http
 ## Installation
 
 ```julia
-]add https://github.com/YOUR_USERNAME/DataVisualisation.jl
+]add [https://github.com/Lu-Dumoulin/DataVisualisation.jl]
 ```
 
 ---
