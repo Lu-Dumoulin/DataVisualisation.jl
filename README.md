@@ -109,17 +109,17 @@ The **Fig size** slider inside the app (200 – 1600 px) controls the Makie canv
 ## UI overview
 
 ```
-┌──────────────┬──────────────────────────────────────────┐
-│ Dimension    │  Heatmap | Colormap | Overlay 1 | Overlay 2│
-│ Fig size     ├──────────────────────────────────────────┤
-├──────────────┤                                          │
-│ Parameter 1  │                                          │
-│ Parameter 2  │              Plot                        │
-│  ...         │                                          │
-│              │                                          │
-├──────────────┴──────────────────────────────────────────┤
-│  Time ──●──────  ▶  ↺ Reset  💾 Save all  🖼 Use PNG    │
-└─────────────────────────────────────────────────────────┘
+┌──────────────┬───────────────────────────────────────────┐
+│ Dimension    │ Heatmap | Colormap | Overlay 1 | Overlay 2│
+│ Fig size     ├───────────────────────────────────────────┤
+├──────────────┤                                           │
+│ Parameter 1  │                                           │
+│ Parameter 2  │              Plot                         │
+│  ...         │                                           │
+│              │                                           │
+├──────────────┴───────────────────────────────────────────┤
+│  Time ──●──────  ▶  ↺ Reset  💾 Save all  🖼 Use PNG     │
+└──────────────────────────────────────────────────────────┘
 ```
 
 - **Overlay controls**: field selector, min-brightness slider (transparency mask), arrows step, arrow size, nematic toggle (headless doubled-angle arrows)
