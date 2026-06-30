@@ -35,10 +35,12 @@ function make_alpha_slider()
 end
 
 # Slider or Dropdown depending on the type of the parameter values.
-function make_widget_df(tab)
+# `init` is the starting value (e.g. the first DataFrame row's value for this variable).
+function make_widget_df(tab, init)
     length(tab) > 1 || return nothing
-    isa(tab[1], AbstractString) ? Bonito.Dropdown(tab; index=1) :
-                                   Bonito.Slider(tab)
+    isa(tab[1], AbstractString) ?
+        Bonito.Dropdown(tab; index=something(findfirst(==(init), tab), 1)) :
+        Bonito.Slider(tab; value=init)
 end
 
 # Card containing controls for one overlay field.

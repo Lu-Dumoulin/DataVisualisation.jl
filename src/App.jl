@@ -100,7 +100,8 @@ function explor_app(ws::DataWorkspace; width="100%", height="1000px", scale=1.0)
         cb_all_1D    = [Bonito.Checkbox(true; style=cb_style) for _ in ws.all_keys]
 
         # ── Sidebar widgets ───────────────────────────────────────────────────
-        wid_all_df = filter(!isnothing, [make_widget_df(tab) for tab in ws.tab_list])
+        wid_all_df = filter(!isnothing,
+            [make_widget_df(ws.tab_list[i], ws.df[1, ws.var_list[i]]) for i in eachindex(ws.tab_list)])
         cb_all_df  = [Bonito.Checkbox(false; style=cb_style) for _ in wid_all_df]
 
         widget_side = Observable{Any}(DOM.div(Col([
