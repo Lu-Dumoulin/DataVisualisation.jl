@@ -9,6 +9,7 @@ include("Utils.jl")
 include("Types.jl")
 include("Plotting.jl")
 include("Widgets.jl")
+include("State.jl")
 include("App.jl")
 
 export DataWorkspace, explor_app

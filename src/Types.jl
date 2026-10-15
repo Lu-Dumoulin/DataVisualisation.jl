@@ -1,26 +1,32 @@
 # ==============================================================================
-# Types.jl — data structures shared across the dashboard
+# Types.jl — plot configuration and dataset description
 # ==============================================================================
 
-# Replaces positional args indexing in make_plot.
-# Adding/removing a field only requires changing this struct and the one
-# place that constructs it (current_config in App.jl).
+# One arrow/transparency overlay drawn on top of the heatmap.
+Base.@kwdef struct OverlayConfig
+    field     ::String     # field key, "None" = no overlay
+    alpha     ::Float64    # min brightness of the transparency mask (1 = no mask)
+    stepp     ::Int        # arrow spacing, in grid points
+    arrowsize ::Float64
+    nematic   ::Bool       # headless arrows with doubled angle
+end
+
+# Everything needed to draw one frame. Built from the widgets by plot_config(d)
+# so that rendering never reads widgets directly.
 Base.@kwdef struct PlotConfig
-    Ndim              ::String
-    nfile             ::Int
-    cmap              ::String
-    first_field_key   ::String
-    second_field_key  ::String
-    alpha             ::Float64
-    stepp             ::Int
-    arrowsize_factor  ::Float64
-    is_nematic        ::Bool
-    third_field_key   ::String
-    alpha_2           ::Float64
-    stepp_2           ::Int
-    arrowsize_factor_2::Float64
-    is_nematic_2      ::Bool
-    fig_base          ::Int
+    Ndim     ::String
+    nfile    ::Int
+    cmap     ::String
+    heatmap  ::String
+    overlays ::Vector{OverlayConfig}
+    fig_base ::Int
+end
+
+# Copy of cfg with some fields replaced, e.g. with(cfg; nfile=3).
+function with(cfg::PlotConfig; kw...)
+    names  = fieldnames(PlotConfig)
+    fields = NamedTuple{names}(getfield.(Ref(cfg), names))
+    return PlotConfig(; merge(fields, values(kw))...)
 end
 
 
@@ -47,20 +53,19 @@ struct DataWorkspace
         dir, name_csv = mysplitpath(path_to_csv)
         df            = CSV.read(joinpath(dir, name_csv), DataFrame; stringtype=String)
 
-        Ncol     = ncol(df)
-        var_list = names(df[:, setdiff(names(df), ["fn"])])
+        var_list = setdiff(names(df), ["fn"])
         tab_list = Any[sort!(unique(df[:, v])) for v in var_list]
 
-        changing_variable_list = [var_list[i] for i in 1:Ncol-1 if length(tab_list[i]) > 1]
+        changing_variable_list = [v for (v, tab) in zip(var_list, tab_list) if length(tab) > 1]
         N_changing             = length(changing_variable_list)
 
         all_dir = get_all_dir_ext(dir; ext=ext)
+        isempty(all_dir) && error("No *$ext files found under $dir")
         Sys.iswindows() && (all_dir .= replace.(all_dir, "\\" => "/"))
 
-        Nfiles          = maximum(length(readdir_ext(d, ext)) for d in all_dir)
-        path_first_file = joinpath(all_dir[1], readdir_ext(all_dir[1], ext)[1])
-        all_keys        = sort(collect(keys(FileIO.load(path_first_file))))
-        all_cmaps       = sort(collect(Makie.all_gradient_names))
+        Nfiles    = maximum(length(frame_files(d, ext)) for d in all_dir)
+        all_keys  = field_keys(frame_path(all_dir[1], 1, ext))
+        all_cmaps = sort(collect(Makie.all_gradient_names))
 
         ranges = [col_range(df, v) for v in changing_variable_list]
 
@@ -68,3 +73,6 @@ struct DataWorkspace
                    N_changing, all_dir, Nfiles, all_keys, all_cmaps, ranges)
     end
 end
+
+# Data/ folder of the run in DataFrame row idx.
+run_path(ws::DataWorkspace, idx) = string(ws.dir, ws.df[idx, :fn], "/Data/")

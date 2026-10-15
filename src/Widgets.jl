@@ -43,17 +43,65 @@ function make_widget_df(tab, init)
         Bonito.Slider(tab; value=init)
 end
 
+# Controls for one overlay. `field` is a plain observable, not a dropdown:
+# the field dropdowns are rebuilt when the key list changes, the selection survives.
+struct OverlayControls
+    field     ::Observable{String}           # "None" = no overlay
+    alpha     ::Bonito.StylableSlider
+    stepp     ::Bonito.Slider{Int}
+    arrowsize ::Bonito.Slider{Int}
+    nematic   ::Bonito.Checkbox
+end
+
+OverlayControls() = OverlayControls(
+    Observable("None"),
+    make_alpha_slider(),
+    Bonito.Slider([5, 10, 15, 20, 25]; value=20),
+    Bonito.Slider(1:15; value=5),
+    Bonito.Checkbox(false; style=cb_style),
+)
+
+OverlayConfig(o::OverlayControls) = OverlayConfig(;
+    field     = o.field[],
+    alpha     = Float64(o.alpha.value[]),
+    stepp     = Int(o.stepp.value[]),
+    arrowsize = Float64(o.arrowsize.value[]),
+    nematic   = o.nematic.value[],
+)
+
+# Observables whose change requires a re-render.
+plot_triggers(o::OverlayControls) =
+    Any[o.field, o.alpha.value, o.stepp.value, o.arrowsize.value, o.nematic.value]
+
+# Set a widget's value from Julia so that the browser follows. Bonito's Slider
+# and Dropdown display their *index*; writing `.value` alone changes the label
+# and the Julia side but leaves the thumb / selection where it was.
+function set_value!(s::Bonito.Slider, v)
+    i = findfirst(==(v), s.values[])
+    isnothing(i) && return
+    s.index[] != i && (s.index[] = i)
+    s.value[] != v && (s.value[] = v)
+    return
+end
+
+function set_value!(dd::Bonito.Dropdown, v)
+    i = findfirst(==(v), dd.options[])
+    isnothing(i) && return
+    dd.option_index[] != i && (dd.option_index[] = i)      # also updates dd.value
+    return
+end
+
 # Card containing controls for one overlay field.
-function overlay_card(label, drop_over, sl_alpha, sl_stepp, sl_arsize, cb_nematic)
+function overlay_card(label, drop_over, o::OverlayControls)
     Card(Grid(Row(
         Col(
             Row("$label: ",         drop_over),
-            Row("Min brightness: ", Labeled(sl_alpha, sl_alpha.value)),
+            Row("Min brightness: ", Labeled(o.alpha, o.alpha.value)),
         ),
         Col(
-            Row("Arrows step: ", Labeled(sl_stepp,  sl_stepp.value)),
-            Row("Arrow size: ",  Labeled(sl_arsize, sl_arsize.value)),
-            Row("Nematic? ",     cb_nematic),
+            Row("Arrows step: ", Labeled(o.stepp,     o.stepp.value)),
+            Row("Arrow size: ",  Labeled(o.arrowsize, o.arrowsize.value)),
+            Row("Nematic? ",     o.nematic),
         )
     )))
 end

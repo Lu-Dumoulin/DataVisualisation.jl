@@ -99,7 +99,7 @@ Returns a Bonito `App` displaying the full dashboard.
 | Keyword  | Default    | Description                                      |
 |----------|------------|--------------------------------------------------|
 | `width`  | `"100%"`   | CSS width of the root container                  |
-| `height` | `"1000px"` | CSS height of the root container                 |
+| `height` | `"auto"`   | CSS height of the root container; `"auto"` grows with the figure, a fixed value (e.g. `"800px"`) scrolls inside |
 | `scale`  | `1.0`      | CSS zoom applied to the whole UI (e.g. `0.75`)   |
 
 The **Fig size** slider inside the app (200 – 1600 px) controls the Makie canvas base dimension; the canvas aspect ratio is always derived from the plotted field's `(Nx, Ny)`.
