@@ -89,7 +89,7 @@ function overlay_alpha!(ax, field, alpha; max_cells=typemax(Int))
     field  = as_obs(field)
     Nx, Ny = size(field[])[1:2]
     mask   = lift(f -> mask_colors(downsample(heatmap_field(f), max_cells), alpha), field)
-    image!(ax, edges(Nx, 1)[[1, end]]..., mask)          # placeholder, replaced below
+    image!(ax, Makie.ClosedInterval(0.5, Nx + 0.5), Makie.ClosedInterval(0.5, Ny + 0.5), mask)
 end
 
 # Arrow components on the (stepp-spaced) grid — polar, or nematic (headless,
@@ -178,8 +178,8 @@ end
 # swapping `src` is much cheaper than a new Makie figure per frame.
 png_data_uri(path) = "data:image/png;base64," * base64encode(read(path))
 
-png_img(src) = DOM.img(; src, style=Styles("max-width" => "100%", "height" => "auto",
-                                           "display" => "block"))
+png_img(src) = DOM.img(; src, style=Styles("max-width" => "100%", "max-height" => "80vh",
+                                           "object-fit" => "contain", "display" => "block"))
 
 
 # ── PNG export (CairoMakie, no WGLMakie session involved) ─────────────────────

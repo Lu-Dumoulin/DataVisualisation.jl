@@ -1,6 +1,6 @@
 module DataVisualisation
 
-using Bonito, Observables, WGLMakie, JLD2, FileIO, Colors,
+using Bonito, Observables, WGLMakie, JLD2, FileIO, Colors, Base64,
       CSV, DataFrames, LinearAlgebra
 import CairoMakie as Cairo
 WGLMakie.activate!()

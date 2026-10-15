@@ -118,10 +118,11 @@ The **Fig size** slider inside the app (200 – 1600 px) controls the Makie canv
 │  ...         │                                           │
 │              │                                           │
 ├──────────────┴───────────────────────────────────────────┤
-│  Time ──●──────  ▶  ↺ Reset  💾 Save all  🖼 Use PNG     │
+│  Time ──●──  ▶  fps ──●──  ↺ Reset  💾 Save all  🖼 Use PNG│
 └──────────────────────────────────────────────────────────┘
 ```
 
 - **Overlay controls**: field selector, min-brightness slider (transparency mask), arrows step, arrow size, nematic toggle (headless doubled-angle arrows)
 - **Save all**: exports every frame of the current run to a `../Fig/` folder as PNG using CairoMakie
-- **Use PNG / Use Field**: toggles between recomputing from raw data and displaying pre-saved PNGs
+- **Use PNG / Use Field**: toggles between recomputing from raw data and displaying pre-saved PNGs (shown as plain images: the fastest way to animate)
+- **▶ / fps**: plays the run at up to `fps` frames per second; a frame is never skipped — if drawing is slower, playback slows down instead. In field mode, frames update the figure in place, and heatmaps larger than the Fig size are block-averaged down to it (exported PNGs keep full resolution)

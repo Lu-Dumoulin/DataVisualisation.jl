@@ -11,6 +11,9 @@ heat(d)       = (f = plot_fig(d); isnothing(f) ? nothing : axis_of(f).scene.plot
 heat_is(d, A) = (x = heat(d); x !== nothing && size(x) == size(A) && x ≈ A)
 plot_kinds(d) = (f = plot_fig(d); isnothing(f) ? [] : plotfuncs(axis_of(f)))
 plot_msg(d)   = dom_text(d.plot[])
+# src of the <img> shown in PNG mode (nothing if the panel shows something else)
+img_src(d)    = (p = d.plot[]; p isa Hyperscript.Node && Hyperscript.tag(p) == "img" ?
+                 Hyperscript.attrs(p)["src"][] : nothing)
 
 # v[:,:,1] == run index, v[:,:,2] == frame → the |v| heatmap identifies both.
 vnorm(run, t) = fill(hypot(run, t), NX, NY)
@@ -293,6 +296,47 @@ end
     end
 end
 
+@testset "frames update the figure in place" begin
+    with_dashboard() do d
+        d.menus[].heatmap.value[] = "v"
+        @test waitfor(() -> heat_is(d, vnorm(1, 1)))
+        fig = plot_fig(d)
+        @test d.live[] isa DV.LiveFigure
+
+        d.nfile.value[] = 2                            # new frame → same figure, new data
+        @test waitfor(() -> heat_is(d, vnorm(1, 2)))
+        @test plot_fig(d) === fig
+
+        d.pathdir[] = DV.run_path(WS, 3)               # other run, same fields/sizes → still in place
+        @test waitfor(() -> heat_is(d, vnorm(3, 2)))
+        @test plot_fig(d) === fig
+
+        d.menus[].colormap.value[] = "viridis"         # layout change → new figure
+        @test waitfor(() -> plot_fig(d) !== nothing && plot_fig(d) !== fig)
+        @test axis_of(plot_fig(d)).scene.plots[1].colormap[] == "viridis"
+
+        fig2 = plot_fig(d)
+        d.overlays[1].field[] = "v"                    # overlay change → new figure
+        @test waitfor(() -> plot_fig(d) !== nothing && plot_fig(d) !== fig2)
+        @test plot_kinds(d) == [Makie.heatmap, Makie.arrows2d]
+    end
+end
+
+@testset "player never skips a frame" begin
+    with_dashboard() do d
+        shown = Int[]
+        f0 = d.renderer.f
+        d.renderer.f = () -> (sleep(0.15); f0(); push!(shown, d.nfile.value[]))   # slow renders
+        d.player.fps.value[] = 24                      # asks for faster than we can draw
+        d.player.button.value[] = true
+        @test waitfor(() -> length(shown) >= 6; timeout=20)
+        d.player.button.value[] = true
+        @test waitfor(() -> d.player.button.content[] == "▶")
+        # consecutive frames, wrapping 3 → 1: no frame was skipped
+        @test all(mod1(a + 1, WS.Nfiles) == b for (a, b) in zip(shown, shown[2:end]))
+    end
+end
+
 @testset "play / pause" begin
     with_dashboard() do d
         d.nfile.value[] = 2
@@ -315,12 +359,18 @@ end
         d.menus[].heatmap.value[] = "v"
         @test waitfor(() -> heat_is(d, vnorm(1, 1)))
         d.renderer.active = true                       # simulate a stuck render loop
-        d.plot[] = Bonito.DOM.div("stale")
+        DV.show!(d, Bonito.DOM.div("stale"))
         d.nfile.value[] = 2                            # would be swallowed by the stuck loop
         sleep(0.3)
         @test plot_msg(d) == "stale"
         d.reset.value[] = true
         @test waitfor(() -> heat_is(d, vnorm(1, 2)))
+        @test d.live[] isa DV.LiveFigure && d.live[].data[]["v"] == frame_fields(1, 2)["v"]
+
+        # Reset while a figure is live must rebuild it, not update one that isn't shown
+        old = plot_fig(d)
+        d.reset.value[] = true
+        @test waitfor(() -> plot_fig(d) !== nothing && plot_fig(d) !== old)
         @test !d.renderer.active
     end
 end
@@ -340,11 +390,19 @@ end
         @test all(t -> isfile(joinpath(figs, "t000$t.png")), 1:3)
 
         d.nfile.value[] = 2
-        @test waitfor(() -> plot_kinds(d) == [Makie.image])
+        @test waitfor(() -> img_src(d) == DV.png_data_uri(joinpath(figs, "t0002.png")))
+        @test d.live[] isa DV.LiveImage
+
+        # next frame: same <img>, new src (the browser swaps the picture in place)
+        img = d.plot[]
+        d.nfile.value[] = 1
+        @test waitfor(() -> img_src(d) == DV.png_data_uri(joinpath(figs, "t0001.png")))
+        @test d.plot[] === img
 
         rm(joinpath(figs, "t0003.png"))
         d.nfile.value[] = 3
         @test waitfor(() -> occursin("PNG not found", plot_msg(d)))
+        @test isnothing(d.live[])
 
         d.png.value[] = true
         @test waitfor(() -> d.png.content[] == "🖼 Use PNG")

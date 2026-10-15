@@ -14,6 +14,18 @@
 # processing the current message causes "notify on null".
 
 
+# on(f, session, obs), but only when the value actually changes. The browser
+# echoes every value Julia sets on a slider back to Julia; without this, each
+# animation frame would be rendered twice.
+function on_change(f, session, obs)
+    last = Ref{Any}(obs[])
+    on(session, obs) do v
+        isequal(v, last[]) && return
+        last[] = v
+        f(v)
+    end
+end
+
 function connect!(d::Dashboard)
     s = d.session
 
@@ -43,12 +55,12 @@ function connect!(d::Dashboard)
 
     # Any plot-relevant change → render (debounced)
     for obs in plot_triggers(d)
-        on(_ -> schedule!(d.renderer), s, obs)
+        on_change(_ -> schedule!(d.renderer), s, obs)
     end
 
     # Sidebar → nearest run (debounced)
     for w in [d.params; d.pins]
-        on(_ -> schedule!(d.snapper), s, w.value)
+        on_change(_ -> schedule!(d.snapper), s, w.value)
     end
     return d
 end
@@ -68,7 +80,8 @@ function layout(d::Dashboard; width="100%", height="auto", scale=1.0)
 
     time_bar = Card(Col(
         Row("Time: ", Labeled(d.nfile, d.nfile.value),
-            d.player.button, d.reset, d.save, d.png),
+            d.player.button, "fps:", Labeled(d.player.fps, d.player.fps.value),
+            d.reset, d.save, d.png),
     ))
     main = Observable{Any}(Col(Card(d.plot), time_bar))
 

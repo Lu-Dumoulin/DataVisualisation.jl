@@ -194,33 +194,78 @@ end
     end
 end
 
-@testset "render_view" begin
+@testset "field_view" begin
     root = make_dataset()
     dir  = datadir(root, "run_001")
-
-    @test occursin("No directory", dom_text(DV.render_view(joinpath(root, "nope"), test_config(), ".jld")))
-    @test occursin("not implemented", dom_text(DV.render_view(dir, test_config(; Ndim="3D"), ".jld")))
-
-    heat(n) = axis_of(DV.render_view(dir, test_config(; nfile=n), ".jld")).scene.plots[1][3][]
+    @test occursin("No directory", DV.field_view(joinpath(root, "nope"), test_config(), ".jld"))
+    @test DV.field_view(dir, test_config(; Ndim="3D"), ".jld") == "3D view not implemented yet"
+    heat(n) = axis_of(DV.field_view(dir, test_config(; nfile=n), ".jld")).scene.plots[1][3][]
     @test heat(2)  == frame_fields(1, 2)["rho"]
     @test heat(99) == frame_fields(1, 3)["rho"]
     @test heat(-5) == frame_fields(1, 1)["rho"]
+    @test_throws Exception DV.field_view(dir, test_config(; heatmap="not_a_field"), ".jld")
+end
 
-    @test_throws Exception DV.render_view(dir, test_config(; heatmap="not_a_field"), ".jld")
+@testset "downsample" begin
+    A = reshape(Float64.(1:24), 6, 4)
+    @test DV.downsample(A, 10) === A                     # small enough: untouched
+    B = DV.downsample(A, 3)                              # factor 2
+    @test size(B) == (3, 2)
+    @test B[1, 1] ≈ (A[1,1] + A[2,1] + A[1,2] + A[2,2]) / 4
+    C = DV.downsample(rand(7, 5), 3)                     # factor 3, partial edge blocks
+    @test size(C) == (3, 2)
+    big = rand(2000, 1000)
+    @test maximum(size(DV.downsample(big, 400))) <= 400
+    @test sum(DV.downsample(big, 400)) / length(DV.downsample(big, 400)) ≈ sum(big) / length(big) rtol=1e-2
+    @test DV.edges(10, 5) == range(0.5, 10.5; length=6)
+end
 
-    @testset "PNG mode" begin
-        cfg = test_config(; nfile=2)
-        png(c=cfg) = DV.render_view(dir, c, ".jld"; use_png=true)
-        @test occursin("No Fig/ folder", dom_text(png()))
-        mkpath(DV.fig_dir(dir))
-        @test occursin("PNG not found", dom_text(png()))
-        DV.Cairo.save(joinpath(DV.fig_dir(dir), "t0002.png"), DV.plot_frame(frame_fields(1, 2), cfg))
-        fig = png()
-        @test fig isa Makie.Figure
-        @test plotfuncs(axis_of(fig)) == [Makie.image]
-        @test occursin("PNG not found", dom_text(png(test_config(; nfile=1))))
-        @test occursin("No Fig/ folder", dom_text(DV.render_view(dir, cfg, ".h5"; use_png=true)))
-    end
+@testset "plot_frame caps the resolution sent to the browser" begin
+    data = Dict{String,Any}("rho" => rand(2000, 1000), "v" => rand(2000, 1000, 2))
+    cfg  = test_config(; fig_base=400, overlays=[overlay(; field="v", alpha=0.5, stepp=100)])
+    ax   = axis_of(DV.plot_frame(data, cfg; max_cells=400))
+    @test size(ax.scene.plots[1][3][]) == (400, 200)                 # heatmap
+    @test size(ax.scene.plots[3][3][]) == (400, 200)                 # mask
+    @test length(ax.scene.plots[2][1][]) == length(1:100:2000) * length(1:100:1000)
+    # still spans the full grid, so arrows stay aligned
+    @test first(ax.scene.plots[1][1][]) == 0.5 && last(ax.scene.plots[1][1][]) == 2000.5
+    # export path: no cap
+    @test size(axis_of(DV.plot_frame(data, cfg)).scene.plots[1][3][]) == (2000, 1000)
+end
+
+@testset "plot_frame from an Observable updates in place" begin
+    data = Observable{Dict{String,Any}}(frame_fields(1, 1))
+    cfg  = test_config(; overlays=[overlay(; field="v", alpha=0.3),
+                                   overlay(; field="Q", nematic=true)])
+    fig  = DV.plot_frame(data, cfg)
+    ax   = axis_of(fig)
+    hm, arr, mask = ax.scene.plots[1:3]
+    before_mask = copy(mask[3][])
+    data[] = frame_fields(3, 2)
+    @test hm[3][] == frame_fields(3, 2)["rho"]
+    @test all(==(Point2(3.0, 2.0)), arr[2][])                         # v = (run, t)
+    @test axis_of(fig) === ax && length(ax.scene.plots) == 4          # same plots, new data
+    @test mask[3][] isa Matrix{RGBA{Float32}}
+end
+
+@testset "PNG lookup" begin
+    root = make_dataset()
+    dir  = datadir(root, "run_001")
+    cfg  = test_config(; nfile=2)
+    @test DV.png_file(dir, cfg, ".jld").msg == "No Fig/ folder found — save images first"
+    mkpath(DV.fig_dir(dir))
+    @test DV.png_file(dir, cfg, ".jld").msg == "PNG not found — save images first"
+    png = joinpath(DV.fig_dir(dir), "t0002.png")
+    DV.Cairo.save(png, DV.plot_frame(frame_fields(1, 2), cfg))
+    @test DV.png_file(dir, cfg, ".jld") == (file=png, msg=nothing)
+    @test DV.png_file(dir, test_config(; nfile=1), ".jld").msg == "PNG not found — save images first"
+    @test DV.png_file(dir, cfg, ".h5").msg == "No Fig/ folder found — save images first"
+
+    uri = DV.png_data_uri(png)
+    @test startswith(uri, "data:image/png;base64,")
+    @test DV.base64decode(uri[length("data:image/png;base64,")+1:end]) == read(png)
+    img = DV.png_img(Observable(uri))
+    @test Hyperscript.tag(img) == "img"
 end
 
 @testset "save_frames" begin

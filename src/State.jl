@@ -41,12 +41,22 @@ reset!(db::Debouncer) = (db.pending = false; db.active = false; nothing)
 # ── Dashboard ─────────────────────────────────────────────────────────────────
 
 struct Player
-    button     ::Bonito.Button
-    playing    ::Threads.Atomic{Bool}
-    frame_time ::Threads.Atomic{Float64}
+    button  ::Bonito.Button
+    playing ::Threads.Atomic{Bool}
+    fps     ::Bonito.Slider{Int}         # maximum speed; never skips frames
 end
 Player() = Player(Bonito.Button("▶"; style=button_style),
-                  Threads.Atomic{Bool}(false), Threads.Atomic{Float64}(1/4))
+                  Threads.Atomic{Bool}(false),
+                  Bonito.Slider([1, 2, 4, 8, 12, 24]; value=4))
+
+# What the plot panel currently shows, when it can be updated in place.
+struct LiveFigure                        # Makie figure reading from `data`
+    key  ::Any                           # layout it was built for (see layout_key)
+    data ::Observable{Dict{String,Any}}
+end
+struct LiveImage                         # <img> showing an exported PNG
+    src ::Observable{String}
+end
 
 # Field dropdowns, rebuilt by field_menus_dom! whenever the key list changes.
 struct FieldMenus
@@ -81,6 +91,7 @@ struct Dashboard
     png      ::Bonito.Button
     menus    ::Base.RefValue{FieldMenus}         # current field dropdowns
     row      ::Base.RefValue{Int}                # DataFrame row of the current run
+    live     ::Base.RefValue{Any}                # LiveFigure, LiveImage or nothing
 
     # Outputs
     plot   ::Observable{Any}                     # Figure or message div
@@ -122,6 +133,7 @@ function Dashboard(ws::DataWorkspace, session::Session)
         Bonito.Button("🖼 Use PNG";  style=button_style),
         Ref{FieldMenus}(),
         Ref(1),
+        Ref{Any}(nothing),
 
         Observable{Any}(DOM.div("Loading…")),
         Observable{Any}(DOM.div()),
@@ -168,11 +180,57 @@ plot_triggers(d::Dashboard) = Any[
 # ── Operations ────────────────────────────────────────────────────────────────
 
 function render!(d::Dashboard)
-    d.plot[] = try
-        render_view(d.pathdir[], plot_config(d), d.ws.ext; use_png=d.use_png[])
+    try
+        cfg = plot_config(d)
+        d.use_png[] ? render_png!(d, cfg) : render_fields!(d, cfg)
     catch e
         @warn "Render failed: $e"
-        DOM.div("Error: $e")
+        show!(d, DOM.div("Error: $e"))
+    end
+    return
+end
+
+# Replace the plot panel content; nothing left to update in place.
+function show!(d::Dashboard, content)
+    d.live[] = nothing
+    d.plot[] = content
+    return
+end
+
+# Everything that shapes the figure, i.e. everything but the frame. While it
+# stays the same, a new frame only replaces the data of the existing figure.
+layout_key(cfg::PlotConfig, data) =
+    (cfg.Ndim, cfg.cmap, cfg.heatmap, cfg.overlays, cfg.fig_base,
+     sort!([k => size(v) for (k, v) in data]))
+
+function render_fields!(d::Dashboard, cfg)
+    data = load_frame(d.pathdir[], cfg, d.ws.ext)
+    data isa AbstractString && return show!(d, DOM.div(data))
+    key  = layout_key(cfg, data)
+    live = d.live[]
+    if live isa LiveFigure && live.key == key
+        live.data[] = data                      # in place: only arrays go to the browser
+    else
+        obs = Observable{Dict{String,Any}}(data)
+        fig = plot_frame(obs, cfg; max_cells=cfg.fig_base)
+        fig isa AbstractString && return show!(d, DOM.div(fig))
+        show!(d, fig)
+        d.live[] = LiveFigure(key, obs)
+    end
+    return
+end
+
+function render_png!(d::Dashboard, cfg)
+    png = png_file(d.pathdir[], cfg, d.ws.ext)
+    isnothing(png.file) && return show!(d, DOM.div(png.msg))
+    src  = png_data_uri(png.file)
+    live = d.live[]
+    if live isa LiveImage
+        live.src[] = src                        # in place: the browser swaps the image
+    else
+        obs = Observable(src)
+        show!(d, png_img(obs))
+        d.live[] = LiveImage(obs)
     end
     return
 end
@@ -234,7 +292,7 @@ function reset_view!(d::Dashboard)
     reset!(d.renderer)
     reset!(d.snapper)
     sleep(0.1)
-    d.plot[] = DOM.div("Reloading…")
+    show!(d, DOM.div("Reloading…"))     # also forgets the live figure: rebuild from scratch
     render!(d)
 end
 
@@ -245,13 +303,28 @@ function toggle_play!(d::Dashboard)
     return
 end
 
-# Advance one frame per frame_time while playing, until the session closes.
+busy(db::Debouncer) = db.active || db.pending
+
+# While playing, advance one frame at most `fps` times per second, and only once
+# the previous frame is drawn — slow frames slow the animation down instead of
+# being skipped. Runs until the session closes.
 function start_player!(d::Dashboard)
     p    = d.player
-    task = @async while !Bonito.isclosed(d.session)
-        t = time()
-        p.playing[] && set_value!(d.nfile, mod1(d.nfile.value[] + 1, d.ws.Nfiles))
-        sleep(max(0.05, p.frame_time[] - (time() - t)))
+    task = @async begin
+        last = 0.0                                   # time of the last frame change
+        while !Bonito.isclosed(d.session)
+            pause = 0.005                            # poll while paused or drawing
+            if p.playing[] && !busy(d.renderer)
+                due = last + 1 / p.fps.value[]
+                if time() >= due
+                    set_value!(d.nfile, mod1(d.nfile.value[] + 1, d.ws.Nfiles))
+                    last = time()
+                else
+                    pause = max(0.001, due - time())  # sleep exactly until the next frame
+                end
+            end
+            sleep(pause)
+        end
     end
     Base.errormonitor(task)
 end
