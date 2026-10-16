@@ -35,8 +35,15 @@ function connect!(d::Dashboard)
     on(_ -> @async(save_all!(d)),    s, d.save.value)
     on(_ -> @async(toggle_png!(d)),  s, d.png.value)
 
-    # Top bar follows the dimension
-    on(_ -> @async(d.top[] = top_dom(d)), s, d.dim.value)
+    # Top bar follows the dimension, and in 1D the cut axis (slider length).
+    # Rebuilding it may adjust selections silently (slice, cut position), so
+    # render again afterwards.
+    rebuild_top!() = (d.top[] = top_dom(d); schedule!(d.renderer))
+    on(_ -> @async(rebuild_top!()), s, d.dim.value)
+    on_change(s, d.cut_axis) do _
+        setfield!(d.cut_pos, :val, 0)            # new axis: start in its middle
+        d.dim.value[] == "1D" && @async(rebuild_top!())
+    end
 
     # New run → update the fields (and dropdowns) first, then render once.
     # Rendering on the path change and again on the key change replaced the
@@ -100,7 +107,7 @@ function layout(d::Dashboard; width="100%", height="auto", scale=1.0)
             style=Styles("grid-column" => "1 / 3", "grid-row" => "3",
                          "padding" => "4px 12px"));
         columns = "2fr 5fr",
-        rows    = "200px 1fr auto",
+        rows    = "auto 1fr auto",
     )
 
     # padding + border-box: the 20px gutter counts inside `width`, so

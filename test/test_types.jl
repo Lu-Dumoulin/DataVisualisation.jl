@@ -4,6 +4,7 @@
     @test cfg.overlays[1].field == "v"
     @test cfg.overlays[1].nematic
     @test cfg.fig_base == 400
+    @test cfg.zslice == 1
     # Every field is required — a missing keyword is an error, not a silent default.
     @test_throws UndefKeywordError DV.PlotConfig(; Ndim="2D")
     @test_throws UndefKeywordError DV.OverlayConfig(; field="v")

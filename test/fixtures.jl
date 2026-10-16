@@ -56,6 +56,43 @@ end
 
 datadir(root, fn) = joinpath(root, fn, "Data")
 
+# 1D ensemble, standard layout: one file per frame, fields of shape (N1,).
+# u[i] = i + t (run 1) or 2(i + t) (run 2); w = t everywhere.
+const N1 = 50
+function make_dataset_1d(root=mktempdir(); nframes=3)
+    df = DataFrame(k=[1.0, 2.0], fn=["r1", "r2"])
+    CSV.write(joinpath(root, "DF.csv"), df)
+    for (r, fn) in enumerate(df.fn)
+        d = joinpath(root, fn, "Data")
+        mkpath(d)
+        for t in 1:nframes
+            write_frame(joinpath(d, frame_name(t)),
+                        Dict{String,Any}("u" => [r * Float64(i + t) for i in 1:N1], "w" => fill(Float64(t), N1)))
+        end
+    end
+    return root
+end
+
+# 3D ensemble: s3[i,j,z] = z (scalar), v3[i,j,z,:] = (run, t, z) (3D vector),
+# plus a 2D field. run_a has NZ_A slices, run_b has NZ_B (exercises clamping).
+const NZ_A, NZ_B = 6, 4
+function make_dataset_3d(root=mktempdir(); nframes=2)
+    df = DataFrame(Re=[1.0, 2.0], fn=["run_a", "run_b"])
+    CSV.write(joinpath(root, "DF.csv"), df)
+    for (r, (fn, nz)) in enumerate(zip(df.fn, (NZ_A, NZ_B)))
+        d = joinpath(root, fn, "Data")
+        mkpath(d)
+        for t in 1:nframes
+            s3 = [Float64(z) for i in 1:NX, j in 1:NY, z in 1:nz]
+            v3 = cat(fill(Float64(r), NX, NY, nz), fill(Float64(t), NX, NY, nz),
+                     [Float64(z) for i in 1:NX, j in 1:NY, z in 1:nz]; dims=4)
+            write_frame(joinpath(d, frame_name(t)),
+                        Dict{String,Any}("s3" => s3, "v3" => v3, "rho" => fill(Float64(t), NX, NY)))
+        end
+    end
+    return root
+end
+
 
 # ── Default configs, overridable per test ─────────────────────────────────────
 
@@ -63,7 +100,8 @@ overlay(; kw...) = DV.OverlayConfig(; merge(
     (field="None", alpha=1.0, stepp=5, arrowsize=1.0, nematic=false), values(kw))...)
 
 test_config(; overlays=[overlay(), overlay()], kw...) = DV.PlotConfig(; merge(
-    (Ndim="2D", nfile=1, cmap="viridis", heatmap="rho", overlays, fig_base=400), values(kw))...)
+    (Ndim="2D", nfile=1, cmap="viridis", heatmap="rho", overlays, fig_base=400, zslice=1,
+     fields1d=["rho"], cut_axis="x", cut_pos=1, cut_mean=false, view1d="Profiles"), values(kw))...)
 
 
 # ── Headless dashboard ────────────────────────────────────────────────────────

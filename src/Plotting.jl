@@ -18,8 +18,13 @@ function frame_path(dir, n, ext)
     return joinpath(dir, files[clamp(n, 1, length(files))])
 end
 
+# Size of every field stored in one frame file. Only numeric arrays count:
+# files can also hold metadata (e.g. a JLD2 `_creator` group) that can't be plotted.
+field_shapes(path) = Dict{String,Tuple}(k => size(v) for (k, v) in FileIO.load(path)
+                                        if v isa AbstractArray{<:Real})
+
 # Sorted field names stored in one frame file.
-field_keys(path) = sort!(collect(keys(FileIO.load(path))))
+field_keys(path) = sort!(collect(keys(field_shapes(path))))
 
 # Exported PNGs live next to the run's Data/ folder.
 fig_dir(dir)              = normpath(joinpath(dir, "..", "Fig"))
@@ -39,7 +44,8 @@ function load_frame(dir, cfg::PlotConfig, ext)
     isdir(dir) || return "No directory: $dir"
     path = frame_path(dir, cfg.nfile, ext)
     isnothing(path) && return "No files in: $dir"
-    keys_needed = unique(filter(!=("None"), [cfg.heatmap; [o.field for o in cfg.overlays]]))
+    keys_needed = cfg.Ndim == "1D" ? copy(cfg.fields1d) :
+                  unique(filter(!=("None"), [cfg.heatmap; [o.field for o in cfg.overlays]]))
     isempty(keys_needed) && return "No fields selected"
     return load_fields(path, keys_needed)
 end
@@ -47,7 +53,62 @@ end
 
 # ── Overlay helpers ───────────────────────────────────────────────────────────
 
-# Scalar field, or the norm of a vector field (Nx, Ny, 2).
+# ── 3D: slicing ─────────────────────────────────────────────────────────────
+# In 3D mode a field is read from its shape:
+#   (Nx, Ny)          2D scalar             → as is
+#   (Nx, Ny, 2)       2D vector             → as is
+#   (Nx, Ny, Nz≠2)    3D scalar, or a stack of 2D fields (e.g. phase fields)
+#   (Nx, Ny, Nz, c)   3D vector with c components
+# Slicing at z turns the last two into a 2D scalar / an (Nx, Ny, c) vector, so
+# everything downstream (heatmap, arrows, mask, export) is the 2D code. The
+# heatmap of a sliced 3D vector shows its full norm; arrows show its x, y part.
+
+# Number of z-slices of a field with this shape (1 = not sliceable).
+depth(sz) = length(sz) == 4 || (length(sz) == 3 && sz[3] != 2) ? sz[3] : 1
+
+nslices(shapes) = maximum(depth, values(shapes); init=1)
+
+function slice_field(f, z)
+    ndims(f) == 4 && return f[:, :, clamp(z, 1, size(f, 3)), :]
+    ndims(f) == 3 && size(f, 3) != 2 && return f[:, :, clamp(z, 1, size(f, 3))]
+    return f
+end
+
+slice_frame(data, cfg::PlotConfig) =
+    cfg.Ndim == "3D" ? Dict{String,Any}(k => slice_field(v, cfg.zslice) for (k, v) in data) : data
+
+
+# ── 1D: profiles ──────────────────────────────────────────────────────────────
+# 1D fields (Nx,) are plotted as they are. 2D fields are cut along one axis —
+# at a position of the other axis, or averaged over it; 2D vectors via their
+# norm. 3D fields have no profile (nothing returned).
+
+is_2d(sz) = length(sz) == 2 || (length(sz) == 3 && sz[3] == 2)
+
+function profile(f, cfg::PlotConfig)
+    ndims(f) == 1 && return f
+    g = ndims(f) == 3 && size(f, 3) == 2 ? heatmap_field(f) : f
+    ndims(g) == 2 || return nothing
+    other = cfg.cut_axis == "x" ? 2 : 1                  # the axis that is fixed / averaged
+    cfg.cut_mean && return vec(sum(g; dims=other)) ./ size(g, other)
+    i = clamp(cfg.cut_pos, 1, size(g, other))
+    return other == 2 ? g[:, i] : g[i, :]
+end
+
+# Length of the axis the cut position moves along (0: no 2D field to cut).
+cut_length(shapes, cut_axis) =
+    maximum((sz[cut_axis == "x" ? 2 : 1] for sz in values(shapes) if is_2d(sz)); init=0)
+
+profiles_frame(data, cfg::PlotConfig) =
+    Dict{String,Any}(k => p for (k, p) in ((k, profile(data[k], cfg)) for k in cfg.fields1d
+                                           if haskey(data, k)) if !isnothing(p))
+
+# What gets plotted from a loaded frame: a z-slice in 3D, profiles in 1D.
+reduce_frame(data, cfg::PlotConfig) =
+    cfg.Ndim == "1D" ? profiles_frame(data, cfg) : slice_frame(data, cfg)
+
+
+# Scalar field, or the norm of a vector field (Nx, Ny, c).
 heatmap_field(f) = ndims(f) > 2 ? dropdims(sqrt.(sum(f.^2; dims=3)); dims=3) : f
 
 # Block-average so that A has at most max_cells cells along each axis. A canvas
@@ -128,17 +189,21 @@ end
 
 # ── Figures ───────────────────────────────────────────────────────────────────
 
-# Figure for one frame. `data` may be an Observable{Dict}: setting data[] to the
+# Figure for one frame (in 3D: one slice, already cut by slice_frame).
+# `data` may be an Observable{Dict}: setting data[] to the
 # next frame (same fields and sizes) redraws in place — that's how the live view
 # animates. Shared with the PNG export (plain Dict, full resolution), so saved
 # images look like the screen. max_cells caps the heatmap/mask resolution.
 function plot_frame(data, cfg::PlotConfig; max_cells=typemax(Int))
-    if cfg.Ndim == "1D"
-        return Figure(size=(cfg.fig_base + 100, 400))       # TODO: 1D view
-    end
-    cfg.Ndim == "2D" || return "$(cfg.Ndim) view not implemented yet"
+    cfg.Ndim == "1D" && return plot_profiles(data, cfg)
+    cfg.Ndim in ("2D", "3D") || return "$(cfg.Ndim) view not implemented yet"
 
     data   = as_obs(data)
+    for k in [cfg.heatmap; [o.field for o in cfg.overlays if o.field != "None"]]
+        n = ndims(data[][k])                     # after slicing in 3D: 2 or 3 (a 2D vector / stack)
+        n == 1 && return "$k is a 1D field — choose Dimension: 1D"
+        n > 3  && return "$k is a 3D field — choose Dimension: 3D"
+    end
     Nx, Ny = size(data[][cfg.heatmap])[1:2]
     scale  = cfg.fig_base / max(Nx, Ny)
     fig    = Figure(size=(round(Int, Nx * scale) + 100, round(Int, Ny * scale)))
@@ -157,11 +222,96 @@ function plot_frame(data, cfg::PlotConfig; max_cells=typemax(Int))
     return fig
 end
 
+# Height of one 1D panel; Fig size scales it (200 / 300 / 220 px at the default 800).
+panel_height(cfg::PlotConfig) =
+    round(Int, cfg.fig_base * (cfg.view1d == "Kymograph" ? 3 / 8 : cfg.view1d == "Times overlaid" ? 11 / 40 : 1 / 4))
+
+# 1D profiles: one panel per field (they rarely share a scale), stacked with a
+# shared x axis. `data` holds the profiles (see reduce_frame); as in 2D it may
+# be an Observable, updated in place; y limits follow each new frame.
+function plot_profiles(data, cfg::PlotConfig)
+    data  = as_obs(data)
+    names = [k for k in cfg.fields1d if haskey(data[], k)]
+    isempty(names) && return "No 1D or 2D field selected"
+    fig  = Figure(size=(cfg.fig_base + 100, 60 + panel_height(cfg) * length(names)))
+    axes = [Makie.Axis(fig[i, 1]; ylabel=name) for (i, name) in enumerate(names)]
+    for (ax, name) in zip(axes, names)
+        lines!(ax, lift(d -> d[name], data); color=:black)
+    end
+    length(axes) > 1 && linkxaxes!(axes...)
+    foreach(ax -> hidexdecorations!(ax; grid=false, ticks=false), axes[1:end-1])
+    axes[end].xlabel = cfg.cut_axis
+    on(_ -> foreach(reset_limits!, axes), data)
+    return fig
+end
+
+# ── 1D: whole-run views (kymograph, times overlaid) ───────────────────────────
+
+const VIEWS_1D = ["Profiles", "Kymograph", "Times overlaid"]
+run_view(cfg::PlotConfig) = cfg.Ndim == "1D" && cfg.view1d != "Profiles"
+
+# Time of each frame: the number in its file name (files are often named by
+# time, e.g. 0000000025.jld), or the frame index when names aren't numbers.
+function frame_times(dir, ext)
+    files = frame_files(dir, ext)
+    nums  = [tryparse(Float64, filter(isdigit, splitext(f)[1])) for f in files]
+    return all(!isnothing, nums) && allunique(nums) ? Float64.(nums) : collect(1.0:length(files))
+end
+
+# Profiles of every frame of the run: field => (points × frames) matrix, plus
+# the frame times — or a message.
+function run_profiles(dir, cfg::PlotConfig, ext)
+    n = length(frame_files(dir, ext))
+    n == 0 && return isdir(dir) ? "No files in: $dir" : "No directory: $dir"
+    frames = [load_frame(dir, with(cfg; nfile=i), ext) for i in 1:n]
+    frames[1] isa AbstractString && return frames[1]
+    profs = [profiles_frame(f, cfg) for f in frames]
+    names = [k for k in cfg.fields1d if haskey(profs[1], k)]
+    isempty(names) && return "No 1D or 2D field selected"
+    return (fields = Dict{String,Matrix{Float64}}(k => reduce(hcat, [p[k] for p in profs]) for k in names),
+            names  = names,
+            times  = frame_times(dir, ext))
+end
+
+# Figure of a whole run; `frame` (an Observable) marks the current frame and
+# can be moved without rebuilding the figure.
+function plot_run(run, cfg::PlotConfig; frame=Observable(cfg.nfile))
+    run isa AbstractString && return run
+    t    = run.times
+    tnow = lift(i -> t[clamp(i, 1, length(t))], frame)
+    fig  = Figure(size=(cfg.fig_base + 100, 60 + panel_height(cfg) * length(run.names)))
+    axes = Makie.Axis[]
+    for (i, name) in enumerate(run.names)
+        A  = run.fields[name]
+        ax = Makie.Axis(fig[i, 1]; title=name)
+        push!(axes, ax)
+        if cfg.view1d == "Kymograph"            # x horizontal, time vertical
+            hm = heatmap!(ax, 1:size(A, 1), t, A; colormap=cfg.cmap)
+            Colorbar(fig[i, 2], hm)
+            hlines!(ax, tnow; color=:black, linewidth=2)
+            ax.ylabel = "t"
+        else                                    # every frame (≤ ~20), coloured by time
+            step = cld(size(A, 2), 20)
+            for j in 1:step:size(A, 2)
+                lines!(ax, A[:, j]; color=t[j], colorrange=(first(t), max(last(t), first(t) + 1)),
+                       colormap=:viridis)
+            end
+            lines!(ax, lift(j -> A[:, clamp(j, 1, size(A, 2))], frame); color=:black, linewidth=3)
+            i == 1 && Colorbar(fig[1:length(run.names), 2]; colormap=:viridis, label="t",
+                               limits=(first(t), max(last(t), first(t) + 1)))
+        end
+    end
+    length(axes) > 1 && linkxaxes!(axes...)
+    axes[end].xlabel = cfg.cut_axis
+    return fig
+end
+
 # Figure from the raw fields, or a message.
 function field_view(dir, cfg::PlotConfig, ext)
+    run_view(cfg) && return plot_run(run_profiles(dir, cfg, ext), cfg)
     data = load_frame(dir, cfg, ext)
     data isa AbstractString && return data
-    return plot_frame(data, cfg)
+    return plot_frame(reduce_frame(data, cfg), cfg)
 end
 
 # Exported PNG for cfg's frame: (file=path, msg=nothing) or (file=nothing, msg=why not).
@@ -191,9 +341,11 @@ function save_frames(on_progress, dir, cfg::PlotConfig, ext)
     isempty(files) && return 0, 0
     mkpath(fig_dir(dir))
     saved = 0
+    run   = run_view(cfg) ? run_profiles(dir, cfg, ext) : nothing    # whole-run views: load once
     for (i, fname) in enumerate(files)
         try
-            fig = field_view(dir, with(cfg; nfile=i), ext)
+            c   = with(cfg; nfile=i)
+            fig = isnothing(run) ? field_view(dir, c, ext) : plot_run(run, c)
             if fig isa Figure
                 Cairo.save(png_path(dir, fname), fig; backend=Cairo)
                 saved += 1

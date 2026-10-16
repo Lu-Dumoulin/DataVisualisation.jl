@@ -20,6 +20,12 @@ Base.@kwdef struct PlotConfig
     heatmap  ::String
     overlays ::Vector{OverlayConfig}
     fig_base ::Int
+    zslice   ::Int                     # 3D: which z-slice (clamped per field)
+    fields1d ::Vector{String}          # 1D: fields to plot, one panel each
+    cut_axis ::String                  # 1D from 2D fields: profile "x" (along x) or "y"
+    cut_pos  ::Int                     #   at this index of the other axis (clamped)…
+    cut_mean ::Bool                    #   …or averaged over the other axis
+    view1d   ::String                  # 1D: "Profiles", "Kymograph" or "Times overlaid"
 end
 
 # Copy of cfg with some fields replaced, e.g. with(cfg; nfile=3).

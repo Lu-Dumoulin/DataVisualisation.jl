@@ -57,6 +57,10 @@ end
 struct LiveImage                         # <img> showing an exported PNG
     src ::Observable{String}
 end
+struct LiveRun                           # 1D whole-run view; `frame` moves its marker
+    key   ::Any
+    frame ::Observable{Int}
+end
 
 # Field dropdowns, rebuilt by field_menus_dom! whenever the key list changes.
 struct FieldMenus
@@ -77,6 +81,14 @@ struct Dashboard
     colormap     ::Observable{String}
     overlays     ::Vector{OverlayControls}
     use_png      ::Observable{Bool}
+    z            ::Observable{Int}               # 3D: selected slice
+    nz           ::Base.RefValue{Int}            # 3D: number of slices in the current run
+    fields1d     ::Observable{Vector{String}}    # 1D: fields shown as profiles
+    cut_axis     ::Observable{String}            # 1D from 2D: "x" or "y"
+    cut_pos      ::Observable{Int}               #   position on the other axis (0: not set yet)
+    cut_mean     ::Observable{Bool}              #   or average over it
+    view1d       ::Observable{String}            # 1D: Profiles / Kymograph / Times overlaid
+    shapes       ::Base.RefValue{Dict{String,Tuple}}   # field sizes in the current run
 
     # Stable widgets — created once, never rebuilt
     dim      ::Bonito.Dropdown
@@ -84,12 +96,13 @@ struct Dashboard
     nfile    ::Bonito.Slider{Int}
     params   ::Vector{Any}                       # sidebar: one widget per changing parameter
     pins     ::Vector{Bonito.Checkbox}
-    keys_1D  ::Vector{Bonito.Checkbox}
     player   ::Player
     reset    ::Bonito.Button
     save     ::Bonito.Button
     png      ::Bonito.Button
     menus    ::Base.RefValue{FieldMenus}         # current field dropdowns
+    zslider  ::Base.RefValue{Any}                # current 3D slice slider (or nothing)
+    menus1d  ::Base.RefValue{Any}                # current 1D controls (NamedTuple) or nothing
     row      ::Base.RefValue{Int}                # DataFrame row of the current run
     live     ::Base.RefValue{Any}                # LiveFigure, LiveImage or nothing
 
@@ -103,15 +116,20 @@ struct Dashboard
     snapper  ::Debouncer
 end
 
-# Keys of the run's first frame; the workspace keys if the run has no frames.
-function initial_keys(ws, path)
+# Only 1D fields: start in the 1D view; only 3D fields: in the 3D view.
+all_1d(shapes) = !isnothing(shapes) && !isempty(shapes) && all(sz -> length(sz) == 1, values(shapes))
+all_3d(shapes) = !isnothing(shapes) && !isempty(shapes) && all(sz -> depth(sz) > 1, values(shapes))
+
+# Field sizes in the run's first frame, or nothing if the run has no frames.
+function run_shapes(ws, path)
     first = frame_path(path, 1, ws.ext)
-    isnothing(first) ? copy(ws.all_keys) : field_keys(first)
+    isnothing(first) ? nothing : field_shapes(first)
 end
 
 function Dashboard(ws::DataWorkspace, session::Session)
-    path = run_path(ws, 1)                       # the run the sidebar starts on
-    keys = initial_keys(ws, path)
+    path   = run_path(ws, 1)                     # the run the sidebar starts on
+    shapes = run_shapes(ws, path)
+    keys   = isnothing(shapes) ? copy(ws.all_keys) : sort!(collect(Base.keys(shapes)))
     d = Dashboard(ws, session,
         Observable(path),
         Observable(keys),
@@ -119,19 +137,28 @@ function Dashboard(ws::DataWorkspace, session::Session)
         Observable(DEFAULT_CMAP in ws.all_cmaps ? DEFAULT_CMAP : ws.all_cmaps[1]),
         [OverlayControls(), OverlayControls()],
         Observable(false),
+        Observable(1),
+        Ref(isnothing(shapes) ? 1 : nslices(shapes)),
+        Observable(copy(keys)),
+        Observable("x"),
+        Observable(0),
+        Observable(false),
+        Observable("Profiles"),
+        Ref(isnothing(shapes) ? Dict{String,Tuple}() : shapes),
 
-        Bonito.Dropdown(["1D", "2D", "3D"]; index=2),
+        Bonito.Dropdown(["1D", "2D", "3D"]; index=all_1d(shapes) ? 1 : all_3d(shapes) ? 3 : 2),
         Bonito.Slider(200:100:1600; value=800),
         Bonito.Slider(1:ws.Nfiles; value=1),
         filter(!isnothing, [make_widget_df(ws.tab_list[i], ws.df[1, ws.var_list[i]])
                             for i in eachindex(ws.tab_list)]),
         [Bonito.Checkbox(false; style=cb_style) for _ in 1:ws.N_changing],
-        [Bonito.Checkbox(true;  style=cb_style) for _ in ws.all_keys],
         Player(),
         Bonito.Button("↺ Reset";    style=button_style),
         Bonito.Button("💾 Save all"; style=button_style),
         Bonito.Button("🖼 Use PNG";  style=button_style),
         Ref{FieldMenus}(),
+        Ref{Any}(nothing),
+        Ref{Any}(nothing),
         Ref(1),
         Ref{Any}(nothing),
 
@@ -168,11 +195,17 @@ plot_config(d::Dashboard; nfile=d.nfile.value[]) = PlotConfig(;
     heatmap  = d.heatmap[],
     overlays = OverlayConfig.(d.overlays),
     fig_base = Int(d.fig_base.value[]),
+    zslice   = d.z[],
+    fields1d = d.fields1d[],
+    cut_axis = d.cut_axis[],
+    cut_pos  = d.cut_pos[],
+    cut_mean = d.cut_mean[],
+    view1d   = d.view1d[],
 )
 
 plot_triggers(d::Dashboard) = Any[
     d.dim.value, d.nfile.value, d.fig_base.value, d.colormap, d.heatmap,
-    d.use_png,                   # (pathdir renders via its own listener, after reload_keys!)
+    d.use_png, d.z, d.fields1d, d.cut_axis, d.cut_pos, d.cut_mean, d.view1d,                   # (pathdir renders via its own listener, after reload_keys!)
     Iterators.flatten(plot_triggers.(d.overlays))...,
 ]
 
@@ -197,15 +230,20 @@ function show!(d::Dashboard, content)
     return
 end
 
-# Everything that shapes the figure, i.e. everything but the frame. While it
-# stays the same, a new frame only replaces the data of the existing figure.
-layout_key(cfg::PlotConfig, data) =
-    (cfg.Ndim, cfg.cmap, cfg.heatmap, cfg.overlays, cfg.fig_base,
-     sort!([k => size(v) for (k, v) in data]))
+# Everything that shapes the figure, i.e. everything but the frame (and the
+# 3D slice / 1D cut position). While it stays the same, new data only replaces
+# the data of the existing figure.
+function layout_key(cfg::PlotConfig, data)
+    sizes = sort!([k => size(v) for (k, v) in data])
+    cfg.Ndim == "1D" && return ("1D", cfg.fields1d, cfg.cut_axis, cfg.cut_mean, cfg.fig_base, sizes)
+    return (cfg.Ndim, cfg.cmap, cfg.heatmap, cfg.overlays, cfg.fig_base, sizes)
+end
 
 function render_fields!(d::Dashboard, cfg)
+    run_view(cfg) && return render_run!(d, cfg)
     data = load_frame(d.pathdir[], cfg, d.ws.ext)
     data isa AbstractString && return show!(d, DOM.div(data))
+    data = reduce_frame(data, cfg)              # 3D → one z-slice, 1D → profiles; updated in place
     key  = layout_key(cfg, data)
     live = d.live[]
     if live isa LiveFigure && live.key == key
@@ -216,6 +254,24 @@ function render_fields!(d::Dashboard, cfg)
         fig isa AbstractString && return show!(d, DOM.div(fig))
         show!(d, fig)
         d.live[] = LiveFigure(key, obs)
+    end
+    return
+end
+
+# Kymograph / times overlaid: the whole run is loaded once per run, fields and
+# cut; a new frame only moves the marker.
+function render_run!(d::Dashboard, cfg)
+    key  = (d.pathdir[], cfg.view1d, cfg.fields1d, cfg.cut_axis, cfg.cut_pos, cfg.cut_mean,
+            cfg.fig_base, cfg.cmap)
+    live = d.live[]
+    if live isa LiveRun && live.key == key
+        live.frame[] = cfg.nfile
+    else
+        frame = Observable(cfg.nfile)
+        fig   = plot_run(run_profiles(d.pathdir[], cfg, d.ws.ext), cfg; frame)
+        fig isa AbstractString && return show!(d, DOM.div(fig))
+        show!(d, fig)
+        d.live[] = LiveRun(key, frame)
     end
     return
 end
@@ -255,15 +311,17 @@ function snap!(d::Dashboard)
     return
 end
 
-# Update the available fields after the run changed, rebuilding the field
-# dropdowns if they differ. Does not render: the caller renders once after.
+# Update the available fields (and 3D slice count) after the run changed,
+# rebuilding the top bar if they differ. Does not render: the caller renders
+# once after.
 function reload_keys!(d::Dashboard, path)
-    first = frame_path(path, 1, d.ws.ext)
-    isnothing(first) && return
-    new_keys = field_keys(first)
-    new_keys == d.current_keys[] && return
-    d.current_keys[] = new_keys
-    d.dim.value[] == "2D" && (d.top[] = field_menus_dom!(d, new_keys))
+    shapes = run_shapes(d.ws, path)
+    isnothing(shapes) && return
+    shapes == d.shapes[] && return
+    d.shapes[]       = shapes
+    d.current_keys[] = sort!(collect(keys(shapes)))
+    d.nz[]           = nslices(shapes)
+    d.top[]          = top_dom(d)
     return
 end
 
@@ -334,9 +392,24 @@ end
 
 function top_dom(d::Dashboard)
     Ndim = d.dim.value[]
-    Ndim == "1D" && return DOM.div(Grid(d.keys_1D...; columns="repeat(2, 1fr)"))
+    Ndim == "1D" && return menus_1d_dom!(d)
     Ndim == "2D" && return field_menus_dom!(d, d.current_keys[])
-    return DOM.div()
+    return DOM.div(field_menus_dom!(d, d.current_keys[]), slice_dom!(d))     # 3D
+end
+
+# 3D slice slider for the current run. The selection lives in d.z and is
+# clamped (silently, like the field selections) when a run has fewer slices.
+function slice_dom!(d::Dashboard)
+    nz = d.nz[]
+    if nz <= 1
+        d.zslider[] = nothing
+        return Card(DOM.div("No 3D fields in this run — showing 2D fields"))
+    end
+    setfield!(d.z, :val, clamp(d.z[], 1, nz))
+    slider = Bonito.Slider(1:nz; value=d.z[])
+    d.zslider[] = slider
+    on(v -> d.z[] = v, d.session, slider.value)
+    return Card(Row("Slice z: ", Labeled(slider, slider.value), "/ $nz"))
 end
 
 # Rebuild the field dropdowns for a new key list.
@@ -373,4 +446,48 @@ function field_menus_dom!(d::Dashboard, field_keys)
         [overlay_card("Overlay $i", menu, o)
          for (i, (o, menu)) in enumerate(zip(d.overlays, menus.overlays))]...,
     ))
+end
+
+# 1D controls for the current run: one checkbox per field, and — when the run
+# has 2D fields — where to cut them. Selections live in d.fields1d / d.cut_*
+# and survive rebuilds (a new run, or a new cut axis changing the slider length).
+function menus_1d_dom!(d::Dashboard)
+    keys = d.current_keys[]
+    sel  = filter(in(keys), d.fields1d[])
+    isempty(sel) && (sel = copy(keys))
+    setfield!(d.fields1d, :val, sel)
+
+    boxes = [Bonito.Checkbox(k in sel; style=cb_style) for k in keys]
+    for (k, cb) in zip(keys, boxes)
+        on(d.session, cb.value) do checked
+            cur = d.fields1d[]
+            d.fields1d[] = [kk for kk in keys if kk == k ? checked : kk in cur]
+        end
+    end
+    fields = Card(Row("Fields: ", [Row(k, cb; gap="2px") for (k, cb) in zip(keys, boxes)]...))
+
+    view = Bonito.Dropdown(VIEWS_1D; index=something(findfirst(==(d.view1d[]), VIEWS_1D), 1))
+    cmap = Bonito.Dropdown(d.ws.all_cmaps; index=findfirst(==(d.colormap[]), d.ws.all_cmaps))
+    on(v -> d.view1d[]   = v, d.session, view.value)
+    on(v -> d.colormap[] = v, d.session, cmap.value)
+    views = Card(Row("View: ", view, "Colormap (kymograph): ", cmap))
+
+    n = cut_length(d.shapes[], d.cut_axis[])
+    if n == 0                                    # only 1D fields: nothing to cut
+        d.menus1d[] = (fields=boxes, view, cmap, axis=nothing, pos=nothing, mean=nothing)
+        return DOM.div(views, fields)
+    end
+    setfield!(d.cut_pos, :val, d.cut_pos[] < 1 ? cld(n, 2) : clamp(d.cut_pos[], 1, n))
+    axis = Bonito.Dropdown(["x", "y"]; index=d.cut_axis[] == "x" ? 1 : 2,
+                           option_to_string=a -> "along $a")
+    pos  = Bonito.Slider(1:n; value=d.cut_pos[])
+    mean = Bonito.Checkbox(d.cut_mean[]; style=cb_style)
+    on(v -> d.cut_axis[] = v, d.session, axis.value)
+    on(v -> d.cut_pos[]  = v, d.session, pos.value)
+    on(v -> d.cut_mean[] = v, d.session, mean.value)
+    d.menus1d[] = (fields=boxes, view, cmap, axis, pos, mean)
+    other = d.cut_axis[] == "x" ? "y" : "x"
+    cut = Card(Row("2D fields: profile ", axis, " at $other = ", Labeled(pos, pos.value),
+                   " or mean over $other ", mean))
+    return DOM.div(views, fields, cut)
 end

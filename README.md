@@ -52,9 +52,47 @@ The package expects one CSV file describing the ensemble and a directory tree of
 | 10.0 | 5.0  | 0.5  | run_002 |
 | 50.0 | 1.0  | 0.5  | run_003 |
 
-Each `.jld` file must contain the field arrays keyed by name (e.g. `"vx"`, `"vy"`, `"pressure"`). Scalar fields have shape `(Nx, Ny)` and vector fields `(Nx, Ny, 2)`.
+Each `.jld` file must contain the field arrays keyed by name (e.g. `"vx"`, `"vy"`, `"pressure"`); anything that isn't a numeric array (metadata such as a JLD2 `_creator` group) is ignored. Field shapes:
+
+| Shape | Meaning | In the **3D** view |
+|---|---|---|
+| `(Nx, Ny)` | 2D scalar | shown as is |
+| `(Nx, Ny, 2)` | 2D vector | shown as is |
+| `(Nx, Ny, Nz)`, `Nz ≠ 2` | 3D scalar, or a stack of 2D fields (e.g. phase fields) | one z-slice, chosen with the **Slice z** slider |
+| `(Nx, Ny, Nz, c)` | 3D vector | one z-slice: heatmap = full norm, arrows = in-plane (x, y) components |
+
+Changing the slice updates the figure in place, like changing the frame; *Save all* exports the current slice.
+
+### 1D view
+
+Choose **Dimension: 1D** (selected automatically when a run only has 1D fields `(Nx,)`):
+
+- **Fields** — one panel per ticked field.
+- **View** — *Profiles* (the current frame), *Kymograph* (x–t heatmap of the whole run, a line marks the current frame) or *Times overlaid* (curves coloured by time, the current one in black). Frame files named by a number (e.g. `0000000025.jld`) give the time axis; otherwise frames are numbered.
+- **2D fields** are cut into profiles *along x* or *along y*, at a position of the other axis, or averaged over it (2D vectors through their norm).
+
+### Single-file runs
+
+Runs stored as one file holding `data = (points, fields, times)` — e.g. `PS_FFT_P_1D/1/Data/data_2.jld` — are converted to the standard layout first (into a temporary folder; the source is not modified). Each file becomes a run, selectable from the sidebar:
+
+```julia
+ws = DataWorkspace(unstack_runs(expanduser("~/Data/PS_FFT_P_1D"); fields=["rho", "v", "P"]), ".jld")
+```
 
 ---
+
+## Try it without simulation data
+
+```
+julia demo.jl 2        # or 1, 3
+```
+
+generates a demo ensemble (`demo_dataset`) in a temporary folder and opens the dashboard on it. Runs are a dense **sphere** or **cube** (disc / square in 2D) of three radii, with **polar**, **nematic** or **nemato-polar** order and **normal** or **tangential** anchoring — an aster or a vortex — breathing and drifting in time. The grid is non-square and the object off-centre, so a swapped axis or a flipped arrow is easy to spot. From Julia:
+
+```julia
+csv = demo_dataset(dims=3)                       # or demo_dataset("some/folder"; dims=3) to keep it
+explor_app(DataWorkspace(csv, ".jld"))
+```
 
 ## Usage
 

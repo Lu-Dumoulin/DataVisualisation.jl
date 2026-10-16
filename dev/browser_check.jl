@@ -16,6 +16,10 @@
 #             whether WGLMakie recreated its canvas (it shouldn't, per frame).
 #             Optional 4th argument: fps slider value (1,2,4,8,12,24; default 4)
 #   png-play  same, in "Use PNG" mode (run Save all first)
+#   3d        switch to 3D, show the first 3D field, drag the slice slider;
+#             reports whether slice changes update the figure in place
+#   1d        switch to 1D, move the 2D cut, switch its axis, play 3 s;
+#             reports whether the figure is updated in place
 #
 # Needs Google Chrome in /Applications. Not part of the test suite.
 
@@ -107,13 +111,58 @@ HTTP.WebSockets.open(wsurl; suppress_close_error=true) do sock
     context_resets() = count(l -> occursin("removing WGL context", l), LOGS)
 
     cdp("Runtime.enable"); cdp("Log.enable"); cdp("Page.enable")
+    t_nav = time()
     cdp("Page.navigate", Dict("url" => "http://127.0.0.1:8081"))
-    sleep(15)
+    waited = 0.0
+    while waited < 60 && !(DREF[] !== nothing && DREF[].live[] !== nothing && !isempty(DURATIONS))
+        sleep(0.05); waited += 0.05
+    end
+    isempty(DURATIONS) || println("$(t())s first figure ready in Julia $(round(RENDERS[1] + DURATIONS[1] - t_nav; digits=2)) s ",
+                                  "after the page request (first render itself: $(round(DURATIONS[1]; digits=2)) s)")
+    sleep(10)
     state("loaded"); println("      screenshot: ", shot("1_loaded"))
 
     if SCENARIO == "polar"
         select_option("polar"); sleep(5)
         state("after polar"); println("      screenshot: ", shot("2_polar"))
+
+    elseif SCENARIO == "3d"
+        select_option("3D"); sleep(4)
+        d = DREF[]
+        f3 = findfirst(k -> occursin("3", k), d.current_keys[])     # first field named like a 3D one
+        isnothing(f3) || (select_option(d.current_keys[][f3]); sleep(4))
+        state("3D"); println("      slices: $(d.nz[])  screenshot: ", shot("2_3d"))
+        resets0 = context_resets()
+        set_slice(z) = js("""(() => {
+            const box = [...document.querySelectorAll('div')].reverse().find(e => e.textContent.startsWith('Slice z:'));
+            const s = box.querySelector('input[type=range]');
+            s.value = $z; s.dispatchEvent(new Event('input')); return s.value })()""")
+        for z in (d.nz[] ÷ 2, d.nz[])
+            println("$(t())s slice → ", set_slice(z)); sleep(3)
+            println("      Julia z=$(d.z[])  screenshot: ", shot("3_slice$z"))
+        end
+        println("      WGL canvas recreated while slicing: $(context_resets() - resets0)×")
+
+    elseif SCENARIO == "1d"
+        d = DREF[]
+        d.dim.value[] == "1D" || (select_option("1D"); sleep(4))
+        state("1D"); println("      fields=$(d.fields1d[]) cut=$(d.cut_axis[])@$(d.cut_pos[])  screenshot: ", shot("2_1d"))
+        resets0 = context_resets()
+        if d.menus1d[].pos !== nothing
+            js("""(() => {
+                const box = [...document.querySelectorAll('div')].reverse().find(e => e.textContent.startsWith('2D fields: profile'));
+                const s = box.querySelector('input[type=range]'); s.value = 1; s.dispatchEvent(new Event('input')); })()""")
+            sleep(3); println("$(t())s cut moved: Julia cut_pos=$(d.cut_pos[])  screenshot: ", shot("3_cut1"))
+            select_option("along y"); sleep(4)
+            println("$(t())s axis y: Julia cut=$(d.cut_axis[])@$(d.cut_pos[])  screenshot: ", shot("4_axis_y"))
+        end
+        r0 = context_resets(); click_button("▶"); sleep(3); click_button("❚❚"); sleep(1)
+        println("$(t())s played to frame $(d.nfile.value[]); WGL canvas recreated while cutting: $(r0 - resets0)×, while playing: $(context_resets() - r0)×")
+        for v in ("Kymograph", "Times overlaid")
+            select_option(v); sleep(6)
+            r1 = context_resets(); click_button("▶"); sleep(3); click_button("❚❚"); sleep(1)
+            println("$(t())s $v: live=$(nameof(typeof(d.live[]))), canvas recreated while playing: $(context_resets() - r1)×  screenshot: ", shot("5_$(replace(v, ' ' => '_'))"))
+        end
 
     elseif SCENARIO in ("play", "png-play")
         SCENARIO == "png-play" && (click_button("Use PNG"); sleep(3))

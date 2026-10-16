@@ -273,17 +273,151 @@ end
 
 @testset "dimension dropdown" begin
     with_dashboard() do d
-        d.dim.value[] = "1D"
-        @test waitfor(() -> count(w -> w isa Bonito.Checkbox, collect_widgets(d.top[])) == length(WS.all_keys))
-        @test waitfor(() -> plot_fig(d) !== nothing && isempty(plot_fig(d).content))
+        d.dim.value[] = "1D"                           # one panel per field, all selected by default
+        @test waitfor(() -> d.menus1d[] !== nothing && length(d.menus1d[].fields) == length(WS.all_keys))
+        @test waitfor(() -> plot_fig(d) !== nothing &&
+                            count(c -> c isa Makie.Axis, plot_fig(d).content) == length(WS.all_keys))
 
-        d.dim.value[] = "3D"
-        @test waitfor(() -> isempty(collect_widgets(d.top[])))
-        @test waitfor(() -> plot_msg(d) == "3D view not implemented yet")
+        d.dim.value[] = "3D"                           # no 3D fields here: 2D fields, a note, no slider
+        @test waitfor(() -> occursin("No 3D fields", dom_text(d.top[])))
+        @test isnothing(d.zslider[])
+        @test waitfor(() -> plot_kinds(d) == [Makie.heatmap])
 
         d.dim.value[] = "2D"
         @test waitfor(() -> plot_kinds(d) == [Makie.heatmap])
         @test contains_obj(collect_widgets(d.top[]), d.menus[].heatmap)
+    end
+end
+
+axes_of(fig) = [c for c in fig.content if c isa Makie.Axis]
+line_y(fig, i) = [p[2] for p in axes_of(fig)[i].scene.plots[1][1][]]   # y values of panel i
+
+@testset "1D: profiles cut from 2D fields" begin
+    with_dashboard() do d
+        d.dim.value[] = "1D"
+        @test waitfor(() -> d.menus1d[] !== nothing && d.menus1d[].pos isa Bonito.Slider)
+        m = d.menus1d[]
+        @test m.pos.values[] == collect(1:NY)                     # along x: position runs over y
+        @test d.cut_pos[] == cld(NY, 2)
+
+        # only rho: one panel, rho[:, y] of frame 1
+        for (k, cb) in zip(d.current_keys[], m.fields)
+            cb.value[] = k == "rho"
+        end
+        @test waitfor(() -> d.fields1d[] == ["rho"])
+        rho = frame_fields(1, 1)["rho"]
+        @test waitfor(() -> plot_fig(d) !== nothing && length(axes_of(plot_fig(d))) == 1 &&
+                            line_y(plot_fig(d), 1) ≈ rho[:, cld(NY, 2)])
+        fig = plot_fig(d)
+
+        m.pos.value[] = 3                                         # move the cut → in place
+        @test waitfor(() -> line_y(plot_fig(d), 1) ≈ rho[:, 3])
+        @test plot_fig(d) === fig
+
+        d.nfile.value[] = 2                                       # time → in place
+        @test waitfor(() -> line_y(plot_fig(d), 1) ≈ frame_fields(1, 2)["rho"][:, 3])
+        @test plot_fig(d) === fig
+
+        m.mean.value[] = true                                     # mean over y
+        @test waitfor(() -> line_y(plot_fig(d), 1) ≈ vec(sum(frame_fields(1, 2)["rho"]; dims=2)) ./ NY)
+
+        m.mean.value[] = false
+        m.axis.value[] = "y"                                      # along y: slider over x, rebuilt
+        @test waitfor(() -> d.menus1d[] !== m && d.menus1d[].pos.values[] == collect(1:NX))
+        @test d.cut_pos[] == cld(NX, 2)
+        @test waitfor(() -> length(line_y(plot_fig(d), 1)) == NY &&
+                            line_y(plot_fig(d), 1) ≈ frame_fields(1, 2)["rho"][cld(NX, 2), :])
+
+        # a 2D vector is cut through its norm
+        d.menus1d[].fields[findfirst(==("v"), d.current_keys[])].value[] = true
+        @test waitfor(() -> length(axes_of(plot_fig(d))) == 2)
+        @test line_y(plot_fig(d), 2) ≈ fill(hypot(1, 2), NY)
+    end
+end
+
+@testset "1D: standard 1D layout" begin
+    root = make_dataset_1d()
+    ws   = DataWorkspace(joinpath(root, "DF.csv"), ".jld")
+    @test ws.all_keys == ["u", "w"]
+    with_dashboard(ws) do d
+        @test d.dim.value[] == "1D"                               # only 1D fields: starts in 1D
+        @test waitfor(() -> d.menus1d[] !== nothing && plot_fig(d) !== nothing &&
+                            length(axes_of(plot_fig(d))) == 2)
+        @test isnothing(d.menus1d[].pos)                         # nothing to cut
+        @test !occursin("2D fields", dom_text(d.top[]))
+        @test line_y(plot_fig(d), 1) ≈ [Float64(i + 1) for i in 1:N1]
+        fig  = plot_fig(d)
+        ylo1 = axes_of(fig)[1].finallimits[].origin[2]          # data from 2: limit ≈ -0.5 (5% padding)
+        d.nfile.value[] = 3
+        @test waitfor(() -> line_y(plot_fig(d), 1) ≈ [Float64(i + 3) for i in 1:N1])
+        @test plot_fig(d) === fig
+        # y limits follow the data (now from 4: limit ≈ 1.5)
+        @test waitfor(() -> axes_of(plot_fig(d))[1].finallimits[].origin[2] > ylo1 + 1.5)
+
+        d.params[1].value[] = 2.0                                 # other run, same fields → in place
+        @test waitfor(() -> line_y(plot_fig(d), 1) ≈ [2 * Float64(i + 3) for i in 1:N1])
+        @test plot_fig(d) === fig
+
+        # whole-run views: the frame only moves the marker
+        d.menus1d[].view.value[] = "Kymograph"
+        @test waitfor(() -> d.live[] isa DV.LiveRun)
+        kfig = plot_fig(d)
+        @test length(axes_of(kfig)) == 2
+        d.nfile.value[] = 1
+        @test waitfor(() -> d.live[].frame[] == 1)
+        @test plot_fig(d) === kfig
+        @test axes_of(kfig)[1].scene.plots[2][1][] == 1.0
+        d.menus1d[].fields[2].value[] = false                    # fewer fields → rebuilt
+        @test waitfor(() -> plot_fig(d) !== kfig && length(axes_of(plot_fig(d))) == 1)
+        d.menus1d[].view.value[] = "Times overlaid"
+        @test waitfor(() -> d.live[] isa DV.LiveRun && d.live[].key[2] == "Times overlaid")
+        d.menus1d[].view.value[] = "Profiles"
+        @test waitfor(() -> d.live[] isa DV.LiveFigure)
+
+        # 2D mode on 1D-only data: a message, not a crash
+        d.dim.value[] = "2D"
+        @test waitfor(() -> plot_msg(d) == "u is a 1D field — choose Dimension: 1D")
+    end
+end
+
+@testset "3D: slice slider" begin
+    root = make_dataset_3d()
+    ws   = DataWorkspace(joinpath(root, "DF.csv"), ".jld")
+    @test ws.all_keys == ["rho", "s3", "v3"]
+    with_dashboard(ws) do d
+        @test d.nz[] == NZ_A
+        d.dim.value[] = "3D"
+        @test waitfor(() -> d.zslider[] isa Bonito.Slider)
+        z = d.zslider[]
+        @test z.values[] == collect(1:NZ_A)
+        @test contains_obj(collect_widgets(d.top[]), z)
+
+        d.menus[].heatmap.value[] = "s3"
+        # (rho is also all 1.0 at t=1: wait for the s3 figure itself)
+        @test waitfor(() -> d.live[] isa DV.LiveFigure && d.live[].key[3] == "s3" &&
+                            heat_is(d, fill(1.0, NX, NY)))
+        fig = plot_fig(d)
+
+        z.value[] = 5                                   # new slice → same figure, new data
+        @test waitfor(() -> heat_is(d, fill(5.0, NX, NY)))
+        @test plot_fig(d) === fig
+        @test DV.plot_config(d).zslice == 5
+
+        d.nfile.value[] = 2                             # time still animates in 3D
+        d.menus[].heatmap.value[] = "v3"
+        @test waitfor(() -> heat_is(d, fill(sqrt(1 + 4 + 25), NX, NY)))
+
+        # run_b has only NZ_B slices: slider rebuilt, selection clamped
+        d.params[1].value[] = 2.0
+        @test waitfor(() -> d.nz[] == NZ_B)
+        @test waitfor(() -> d.zslider[] !== z && d.zslider[].values[] == collect(1:NZ_B))
+        @test d.z[] == NZ_B
+        @test waitfor(() -> heat_is(d, fill(sqrt(4 + 4 + 16), NX, NY)))
+
+        # 2D mode ignores the slice
+        d.dim.value[] = "2D"
+        d.menus[].heatmap.value[] = "rho"
+        @test waitfor(() -> heat_is(d, fill(2.0, NX, NY)))
     end
 end
 
