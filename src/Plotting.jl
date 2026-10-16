@@ -153,36 +153,62 @@ function overlay_alpha!(ax, field, alpha; max_cells=typemax(Int))
     image!(ax, Makie.ClosedInterval(0.5, Nx + 0.5), Makie.ClosedInterval(0.5, Ny + 0.5), mask)
 end
 
-# Arrow components on the (stepp-spaced) grid — polar, or nematic (headless,
-# doubled angle, length 4|Q|).
+# Below this max norm a vector field is treated as numerical noise: no arrows.
+const MIN_ARROW_NORM = 1e-6
+
+# Largest norm of a vector field over the whole grid — the full norm (z
+# included for a sliced 3D vector) for polar fields, |Q| = √(Q₁² + Q₂²) for
+# nematic ones. Arrows are drawn relative to it.
+max_norm(field, is_nematic) =
+    is_nematic ? maximum(sqrt.(field[:, :, 1].^2 .+ field[:, :, 2].^2)) : maximum(heatmap_field(field))
+
+# Arrow components on the (stepp-spaced) grid, normalized by the field's max
+# norm so the longest arrow has length 1 — polar, or nematic (headless,
+# doubled angle, length |Q|). All zero (nothing drawn) when the max norm is
+# below MIN_ARROW_NORM.
 function arrow_dirs(field, x, y, is_nematic)
     tu, tv = field[x,y,1], field[x,y,2]
     if is_nematic
-        S     = 4 .* sqrt.(tu.^2 .+ tv.^2)
+        S     = sqrt.(tu.^2 .+ tv.^2)
         theta = 0.5 .* atan.(tv .+ 1e-6, tu)
         tu, tv = S .* cos.(theta), S .* sin.(theta)
     end
-    return vec(Vec2f.(tu, tv))
+    m = max_norm(field, is_nematic)
+    (m >= MIN_ARROW_NORM && isfinite(m)) || return zeros(Vec2f, length(x) * length(y))
+    return vec(Vec2f.(tu ./ m, tv ./ m))
 end
 
-function draw_arrows!(ax, field, stepp, arrowsize_factor, is_nematic)
+# Arrows of normalized length: at arrow size 5 the longest spans one arrow spacing.
+function draw_arrows!(ax, field, stepp, arrowsize_factor, is_nematic;
+                      color=is_nematic ? :white : :black)
     field  = as_obs(field)
     Nx, Ny = size(field[])[1:2]
     x, y   = 1:stepp:Nx, 1:stepp:Ny
     points = vec([Point2f(i, j) for i in x, j in y])
     dirs   = lift(f -> arrow_dirs(f, x, y, is_nematic), field)
+    scale  = stepp * arrowsize_factor / 5
     if is_nematic
-        arrows2d!(ax, points, dirs; lengthscale=arrowsize_factor, align=:center,
-                  tiplength=0, color=:white)
+        arrows2d!(ax, points, dirs; lengthscale=scale, align=:center, tiplength=0, color)
     else
-        arrows2d!(ax, points, dirs; lengthscale=arrowsize_factor, align=:center,
-                  color=:black)
+        arrows2d!(ax, points, dirs; lengthscale=scale, align=:center, color)
     end
+end
+
+# "max |P| = 0.832   max |Q| = 1.0" for the vector overlays of a frame.
+function arrows_title(data, overlays)
+    parts = String[]
+    for o in overlays
+        (o.field != "None" && ndims(data[o.field]) > 2) || continue
+        m = max_norm(data[o.field], o.nematic)
+        push!(parts, "max |$(o.field)| = $(round(m; sigdigits=3))" *
+                     (m < MIN_ARROW_NORM ? " (< 1e-6: no arrows)" : ""))
+    end
+    return join(parts, "   ")
 end
 
 function draw_overlay!(ax, field, o::OverlayConfig; max_cells=typemax(Int))
     field = as_obs(field)
-    ndims(field[]) > 2 && draw_arrows!(ax, field, o.stepp, o.arrowsize, o.nematic)
+    ndims(field[]) > 2 && draw_arrows!(ax, field, o.stepp, o.arrowsize, o.nematic; color=Symbol(o.color))
     overlay_alpha!(ax, field, o.alpha; max_cells)
 end
 
@@ -207,7 +233,8 @@ function plot_frame(data, cfg::PlotConfig; max_cells=typemax(Int))
     Nx, Ny = size(data[][cfg.heatmap])[1:2]
     scale  = cfg.fig_base / max(Nx, Ny)
     fig    = Figure(size=(round(Int, Nx * scale) + 100, round(Int, Ny * scale)))
-    ax     = Makie.Axis(fig[1,1]; aspect=DataAspect())
+    title  = lift(d -> arrows_title(d, cfg.overlays), data)    # max norms, follows each frame
+    ax     = Makie.Axis(fig[1,1]; aspect=DataAspect(), title)
     limits!(ax, 0.5, Nx + 0.5, 0.5, Ny + 0.5)
 
     heat = lift(d -> downsample(heatmap_field(d[cfg.heatmap]), max_cells), data)

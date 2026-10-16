@@ -13,6 +13,21 @@ const cb_style = Styles(
     CSS("height" => "14px"),
 )
 
+# A checkbox drawn as a sliding switch; the track takes the colour it selects
+# (unchecked: black, checked: white), so it needs no label.
+const switch_style = Styles(
+    CSS("appearance" => "none", "-webkit-appearance" => "none",
+        "transform" => "none", "min-width" => "0", "padding" => "0", "margin" => "0 4px",
+        "width" => "34px", "height" => "18px", "border-radius" => "9px",
+        "border" => "1px solid #888", "background" => "#111",
+        "position" => "relative", "cursor" => "pointer", "vertical-align" => "middle"),
+    CSS("::before", "content" => "''", "position" => "absolute", "top" => "1px", "left" => "1px",
+        "width" => "14px", "height" => "14px", "border-radius" => "50%",
+        "background" => "#fff", "transition" => "left 0.15s"),
+    CSS(":checked", "background" => "#fff"),
+    CSS(":checked::before", "left" => "17px", "background" => "#111"),
+)
+
 const button_style = Styles(
     "background"    => "white",
     "border"        => "1px solid black",
@@ -51,14 +66,16 @@ struct OverlayControls
     stepp     ::Bonito.Slider{Int}
     arrowsize ::Bonito.Slider{Int}
     nematic   ::Bonito.Checkbox
+    white     ::Bonito.Checkbox              # arrow colour switch: off black, on white
 end
 
-OverlayControls() = OverlayControls(
+OverlayControls(color="black") = OverlayControls(
     Observable("None"),
     make_alpha_slider(),
     Bonito.Slider([5, 10, 15, 20, 25]; value=20),
     Bonito.Slider(1:15; value=5),
     Bonito.Checkbox(false; style=cb_style),
+    Bonito.Checkbox(color == "white"; style=switch_style),
 )
 
 OverlayConfig(o::OverlayControls) = OverlayConfig(;
@@ -67,11 +84,12 @@ OverlayConfig(o::OverlayControls) = OverlayConfig(;
     stepp     = Int(o.stepp.value[]),
     arrowsize = Float64(o.arrowsize.value[]),
     nematic   = o.nematic.value[],
+    color     = o.white.value[] ? "white" : "black",
 )
 
 # Observables whose change requires a re-render.
 plot_triggers(o::OverlayControls) =
-    Any[o.field, o.alpha.value, o.stepp.value, o.arrowsize.value, o.nematic.value]
+    Any[o.field, o.alpha.value, o.stepp.value, o.arrowsize.value, o.nematic.value, o.white.value]
 
 # Set a widget's value from Julia so that the browser follows. Bonito's Slider
 # and Dropdown display their *index*; writing `.value` alone changes the label
@@ -101,7 +119,7 @@ function overlay_card(label, drop_over, o::OverlayControls)
         Col(
             Row("Arrows step: ", Labeled(o.stepp,     o.stepp.value)),
             Row("Arrow size: ",  Labeled(o.arrowsize, o.arrowsize.value)),
-            Row("Nematic? ",     o.nematic),
+            Row("Color: ", o.white, "Nematic? ", o.nematic),
         )
     )))
 end

@@ -72,8 +72,8 @@ end
         @test plotfuncs(ax) == [Makie.arrows2d]
         p = ax.scene.plots[1]
         @test length(p[1][]) == length(1:5:20) * length(1:5:10)
-        @test all(==(Point2(1.0, 2.0)), p[2][])     # directions are the raw vectors
-        @test p.lengthscale[] == 3.0
+        @test all(d -> d ≈ Point2(1, 2) / sqrt(5), p[2][])   # normalized by the max norm √5
+        @test p.lengthscale[] == 5 * 3.0 / 5                  # step × size / 5
         @test p.color[] == :black
     end
 
@@ -85,9 +85,30 @@ end
         @test p.tiplength[] == 0
         @test p.color[] == :white
         d = p[2][][1]
-        @test hypot(d...) ≈ 4.0 atol=1e-5
+        @test hypot(d...) ≈ 1.0 atol=1e-5                    # |Q| / max |Q|
         @test atan(d[2], d[1]) ≈ π/4 atol=1e-5
     end
+end
+
+@testset "arrow normalization" begin
+    v = cat(fill(3.0, 4, 3), fill(4.0, 4, 3); dims=3); v[1, 1, :] .= 0
+    @test DV.max_norm(v, false) == 5.0
+    @test DV.max_norm(cat(fill(0.6, 4, 3), fill(0.8, 4, 3); dims=3), true) ≈ 1.0
+    @test DV.max_norm(rand(4, 3, 3) .+ cat(zeros(4, 3, 2), fill(10.0, 4, 3); dims=3), false) > 10   # z counts
+
+    small = 1e-5 .* v                                        # small but above the noise floor
+    @test maximum(d -> hypot(d...), DV.arrow_dirs(small, 1:4, 1:3, false)) ≈ 1
+    for noise in (1e-16 .* v, zeros(4, 3, 2))                # round-off level, or exactly 0
+        dirs = DV.arrow_dirs(noise, 1:4, 1:3, false)
+        @test length(dirs) == 12 && all(d -> hypot(d...) == 0, dirs)   # no arrows, no NaN
+    end
+    @test DV.arrows_title(Dict{String,Any}("V" => 3.2e-16 .* v), [overlay(; field="V")]) ==
+          "max |V| = 1.6e-15 (< 1e-6: no arrows)"
+
+    data = Dict{String,Any}("v" => v, "Q" => cat(fill(1.0, 4, 3), zeros(4, 3); dims=3), "rho" => rand(4, 3))
+    @test DV.arrows_title(data, [overlay(; field="v"), overlay(; field="Q", nematic=true)]) ==
+          "max |v| = 5.0   max |Q| = 1.0"
+    @test DV.arrows_title(data, [overlay(; field="rho"), overlay()]) == ""   # scalars: no label
 end
 
 @testset "draw_overlay!" begin
@@ -169,11 +190,17 @@ end
 
     @testset "overlays" begin
         cfg = test_config(; overlays=[overlay(; field="v", alpha=0.5),
-                                      overlay(; field="Q", nematic=true)])
+                                      overlay(; field="Q", nematic=true, color="white")])
         ax  = axis_of(DV.plot_frame(data, cfg))
         @test plotfuncs(ax) == [Makie.heatmap, Makie.arrows2d, Makie.image, Makie.arrows2d]
         @test ax.scene.plots[2].color[] == :black
         @test ax.scene.plots[4].color[] == :white
+
+        # the colour is the overlay's choice, whatever the arrow type
+        cfg = test_config(; overlays=[overlay(; field="v", color="white"),
+                                      overlay(; field="Q", nematic=true, color="black")])
+        ax  = axis_of(DV.plot_frame(data, cfg))
+        @test ax.scene.plots[2].color[] == :white && ax.scene.plots[3].color[] == :black
 
         ax = axis_of(DV.plot_frame(data, test_config(; overlays=[overlay(; field="rho", alpha=0.0)])))
         @test plotfuncs(ax) == [Makie.heatmap, Makie.image]
@@ -266,7 +293,8 @@ end
         cfg  = test_config(; Ndim="3D", heatmap="v3", overlays=[overlay(; field="v3", stepp=2)])
         ax   = axis_of(DV.plot_frame(data, cfg))
         @test ax.scene.plots[1][3][] ≈ fill(sqrt(1 + 4 + 16), 4, 3)   # full norm, z included
-        @test all(==(Point2(1.0, 2.0)), ax.scene.plots[2][2][])      # arrows: in-plane x, y
+        @test all(d -> d ≈ Point2(1, 2) / sqrt(21), ax.scene.plots[2][2][])  # in-plane x, y over the full norm
+        @test ax.title[] == "max |v3| = $(round(sqrt(21); sigdigits=3))"
     end
 
     @testset "field_view / export in 3D" begin
@@ -421,7 +449,8 @@ end
     before_mask = copy(mask[3][])
     data[] = frame_fields(3, 2)
     @test hm[3][] == frame_fields(3, 2)["rho"]
-    @test all(==(Point2(3.0, 2.0)), arr[2][])                         # v = (run, t)
+    @test all(d -> d ≈ Point2(3, 2) / sqrt(13), arr[2][])             # v = (run, t), normalized
+    @test ax.title[] == "max |v| = 3.61   max |Q| = $(round(DV.max_norm(frame_fields(3, 2)["Q"], true); sigdigits=3))"
     @test axis_of(fig) === ax && length(ax.scene.plots) == 4          # same plots, new data
     @test mask[3][] isa Matrix{RGBA{Float32}}
 end

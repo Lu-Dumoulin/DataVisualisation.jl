@@ -25,13 +25,18 @@ end
     o = DV.OverlayControls()
     @test o.field[] == "None"
     cfg = DV.OverlayConfig(o)
-    @test cfg == DV.OverlayConfig(; field="None", alpha=1.0, stepp=20, arrowsize=5.0, nematic=false)
+    @test cfg == DV.OverlayConfig(; field="None", alpha=1.0, stepp=20, arrowsize=5.0, nematic=false, color="black")
+    @test DV.OverlayControls("white").white.value[] == true          # switch on = white
+    @test DV.OverlayControls().white.value[] == false
 
     o.field[] = "v"; o.alpha.value[] = 0.3; o.stepp.value[] = 10
     o.arrowsize.value[] = 7; o.nematic.value[] = true
-    @test DV.OverlayConfig(o) == DV.OverlayConfig(; field="v", alpha=0.3, stepp=10, arrowsize=7.0, nematic=true)
+    o.white.value[] = true
+    @test DV.OverlayConfig(o) == DV.OverlayConfig(; field="v", alpha=0.3, stepp=10, arrowsize=7.0,
+                                                   nematic=true, color="white")
 
-    @test length(DV.plot_triggers(o)) == 5
+    @test length(DV.plot_triggers(o)) == 6
+    @test contains_obj(DV.plot_triggers(o), o.white.value)
     @test contains_obj(DV.plot_triggers(o), o.field)
 end
 
@@ -40,7 +45,7 @@ end
     drop  = Bonito.Dropdown(["None", "v"])
     card  = DV.overlay_card("Overlay 1", drop, o)
     found = collect_widgets(card)
-    @test all(w -> contains_obj(found, w), (drop, o.alpha, o.stepp, o.arrowsize, o.nematic))
+    @test all(w -> contains_obj(found, w), (drop, o.alpha, o.stepp, o.arrowsize, o.nematic, o.white))
     s = Bonito.Session()
     @test occursin("Overlay 1", string(Bonito.session_dom(s, card)))
     close(s)

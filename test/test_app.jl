@@ -144,6 +144,12 @@ end
 
         m1.value[] = "None"
         @test waitfor(() -> plot_kinds(d) == [Makie.heatmap, Makie.arrows2d])
+
+        # arrow colours: overlay 1 black and overlay 2 white by default, selectable
+        @test (o1.white.value[], o2.white.value[]) == (false, true)        # black, white
+        @test axis_of(plot_fig(d)).scene.plots[2].color[] == :white          # overlay 2 (Q)
+        o2.white.value[] = false
+        @test waitfor(() -> axis_of(plot_fig(d)).scene.plots[2].color[] == :black)
     end
 end
 

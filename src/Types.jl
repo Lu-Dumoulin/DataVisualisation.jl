@@ -9,6 +9,7 @@ Base.@kwdef struct OverlayConfig
     stepp     ::Int        # arrow spacing, in grid points
     arrowsize ::Float64
     nematic   ::Bool       # headless arrows with doubled angle
+    color     ::String     # arrow colour: "black" or "white"
 end
 
 # Everything needed to draw one frame. Built from the widgets by plot_config(d)

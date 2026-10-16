@@ -135,7 +135,7 @@ function Dashboard(ws::DataWorkspace, session::Session)
         Observable(keys),
         Observable(keys[1]),
         Observable(DEFAULT_CMAP in ws.all_cmaps ? DEFAULT_CMAP : ws.all_cmaps[1]),
-        [OverlayControls(), OverlayControls()],
+        [OverlayControls("black"), OverlayControls("white")],   # default arrow colours
         Observable(false),
         Observable(1),
         Ref(isnothing(shapes) ? 1 : nslices(shapes)),

@@ -97,7 +97,7 @@ end
 # ── Default configs, overridable per test ─────────────────────────────────────
 
 overlay(; kw...) = DV.OverlayConfig(; merge(
-    (field="None", alpha=1.0, stepp=5, arrowsize=1.0, nematic=false), values(kw))...)
+    (field="None", alpha=1.0, stepp=5, arrowsize=1.0, nematic=false, color="black"), values(kw))...)
 
 test_config(; overlays=[overlay(), overlay()], kw...) = DV.PlotConfig(; merge(
     (Ndim="2D", nfile=1, cmap="viridis", heatmap="rho", overlays, fig_base=400, zslice=1,
