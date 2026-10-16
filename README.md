@@ -1,19 +1,22 @@
 # DataVisualisation.jl
 
-Interactive parameter-space explorer for 2D hydrodynamic simulations.
+Interactive parameter-space explorer for 1D, 2D and 3D simulation ensembles.
 Built on [Bonito](https://github.com/SimonDanisch/Bonito.jl) and [WGLMakie](https://docs.makie.org/stable/), it works both as a standalone web app and embedded in a [Pluto](https://plutojl.org/) notebook.
 
 ---
 
 ## Features
 
-- **Parameter-space navigation** — sliders and dropdowns reflect every varying parameter in your simulation ensemble; the app snaps to the nearest available run
+- **Parameter-space navigation** — sliders and dropdowns reflect every varying parameter in your simulation ensemble; the app snaps to the nearest available run, keeping the parameter you just changed
 - **Pin checkboxes** — lock any parameter to prevent it from being snapped away while you sweep another
 - **2D heatmap** — any scalar or vector field (norm displayed for vector), with free colormap selection
-- **Two independent overlays** — arrow glyphs for vector fields (polar or nematic/headless), with per-overlay transparency mask and step/size controls
-- **Time animation** — slider over all output frames, play/pause button, configurable frame rate
+- **Two independent overlays** — arrows for vector fields (polar or nematic/headless), normalized by the field's max norm (shown above the plot), black or white, with per-overlay transparency mask and step/size controls
+- **3D** — one z-slice at a time with a **Slice z** slider, for 3D fields and stacks of 2D fields
+- **1D** — profiles, kymograph or times overlaid, for 1D fields and for cuts through 2D fields
+- **Smooth animation** — frames, slices and cuts update the figure in place; play/pause with an fps limit, never skipping a frame; large heatmaps are downscaled to the canvas
 - **Aspect-ratio-aware figures** — canvas size is computed from the field's `(Nx, Ny)` dimensions, with a tunable base size slider
-- **Export** — save every frame of the current run as a PNG via CairoMakie in one click
+- **Export** — save every frame of the current run as a PNG via CairoMakie in one click, and replay the PNGs
+- **Demo data** — a generated ensemble to try the app without simulations (`julia demo.jl`)
 - **Pluto embedding** — `scale` kwarg shrinks the whole UI to fit inside a notebook cell
 
 ---
@@ -21,8 +24,10 @@ Built on [Bonito](https://github.com/SimonDanisch/Bonito.jl) and [WGLMakie](http
 ## Installation
 
 ```julia
-]add [https://github.com/Lu-Dumoulin/DataVisualisation.jl]
+]add https://github.com/Lu-Dumoulin/DataVisualisation.jl
 ```
+
+Or, from a clone of this repository, `julia run.jl` (edit the `DF.csv` path inside) runs the dashboard from the checkout itself, whatever your global environment holds.
 
 ---
 
@@ -127,7 +132,7 @@ Loads the ensemble descriptor and pre-computes the parameter ranges used for nea
 
 | Argument      | Type     | Description                              |
 |---------------|----------|------------------------------------------|
-| `path_to_csv` | `String` | Absolute path to the CSV file            |
+| `path_to_csv` | `String` | Path to the CSV file                     |
 | `ext`         | `String` | File extension of output files (`.jld`)  |
 
 ### `explor_app(ws; width, height, scale)`
@@ -142,6 +147,14 @@ Returns a Bonito `App` displaying the full dashboard.
 
 The **Fig size** slider inside the app (200 – 1600 px) controls the Makie canvas base dimension; the canvas aspect ratio is always derived from the plotted field's `(Nx, Ny)`.
 
+### `unstack_runs(src, dest=mktempdir(); fields, key="data")`
+
+Converts runs stored as one file each (`key` = `(points, fields, times)` array) to the standard layout and returns the new `DF.csv` path — see [Single-file runs](#single-file-runs).
+
+### `demo_dataset(dest=mktempdir(); dims=2, …)`
+
+Writes the demo ensemble and returns its `DF.csv` path — see [Try it without simulation data](#try-it-without-simulation-data). Keyword arguments set the grid, number of frames, radii, shapes, orders and anchorings; `layout=:stacked` (1D) writes single-file runs for `unstack_runs`. The default temporary folder is deleted when Julia exits.
+
 ---
 
 ## UI overview
@@ -149,7 +162,8 @@ The **Fig size** slider inside the app (200 – 1600 px) controls the Makie canv
 ```
 ┌──────────────┬───────────────────────────────────────────┐
 │ Dimension    │ Heatmap | Colormap | Overlay 1 | Overlay 2│
-│ Fig size     ├───────────────────────────────────────────┤
+│ Fig size     │ (3D: + Slice z)   (1D: View, Fields, cut) │
+│              ├───────────────────────────────────────────┤
 ├──────────────┤                                           │
 │ Parameter 1  │                                           │
 │ Parameter 2  │              Plot                         │
@@ -160,7 +174,18 @@ The **Fig size** slider inside the app (200 – 1600 px) controls the Makie canv
 └──────────────────────────────────────────────────────────┘
 ```
 
-- **Overlay controls**: field selector, min-brightness slider (transparency mask), arrows step, arrow size, nematic toggle (headless doubled-angle arrows). Arrows are normalized by the field's maximum norm (|Q| for nematic fields), which is shown above the plot for every frame — the longest arrow spans one arrow spacing at size 5. Fields whose max norm is below 1e-6 (numerical noise) get no arrows.
+- **Overlay controls**: field selector, min-brightness slider (transparency mask), arrows step, arrow size, **Color** switch (black / white; overlay 1 black and overlay 2 white by default) and **Nematic?** (headless doubled-angle arrows). Arrows are normalized by the field's maximum norm (|Q| for nematic fields), which is shown above the plot for every frame — the longest arrow spans one arrow spacing at size 5. Fields whose max norm is below 1e-6 (numerical noise) get no arrows.
 - **Save all**: exports every frame of the current run to a `../Fig/` folder as PNG using CairoMakie
 - **Use PNG / Use Field**: toggles between recomputing from raw data and displaying pre-saved PNGs (shown as plain images: the fastest way to animate)
 - **▶ / fps**: plays the run at up to `fps` frames per second; a frame is never skipped — if drawing is slower, playback slows down instead. In field mode, frames update the figure in place, and heatmaps larger than the Fig size are block-averaged down to it (exported PNGs keep full resolution)
+
+---
+
+## Development
+
+```
+julia --project=. -e 'using Pkg; Pkg.test()'          # full test suite (~40 s)
+julia dev/browser_check.jl play path/to/DF.csv out/ 24 # drive the app in headless Chrome
+```
+
+`dev/browser_check.jl` (needs Google Chrome) opens the dashboard in a real browser through the DevTools protocol and reports what the tests can't see: browser console errors, frames per second, whether figures are rebuilt or updated in place, and screenshots. Scenarios: `load`, `polar`, `play`, `png-play`, `3d`, `1d`.
