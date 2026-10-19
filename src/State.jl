@@ -51,9 +51,18 @@ Player() = Player(Bonito.Button("▶"; style=button_style),
 
 # What the plot panel currently shows, when it can be updated in place.
 struct LiveFigure                        # Makie figure reading from `data`
-    key  ::Any                           # layout it was built for (see layout_key)
-    data ::Observable{Dict{String,Any}}
+    key   ::Any                          # layout it was built for (see layout_key)
+    data  ::Observable{Dict{String,Any}}
+    style ::Observable{PlotConfig}       # in-place settings (arrow sizes)
 end
+
+# A rebuild replaces the WebGL canvas. Replacing it again before the browser has
+# set the previous one up makes WGLMakie throw (setup_scene_init on a removed
+# canvas) — what a fast drag on a layout control used to do. So a rebuild waits
+# until the controls have been still for REBUILD_SETTLE s, and at least
+# MIN_REBUILD_GAP s after the previous one.
+const REBUILD_SETTLE  = 0.2
+const MIN_REBUILD_GAP = 0.6
 struct LiveImage                         # <img> showing an exported PNG
     src ::Observable{String}
 end
@@ -105,6 +114,7 @@ struct Dashboard
     menus1d  ::Base.RefValue{Any}                # current 1D controls (NamedTuple) or nothing
     row      ::Base.RefValue{Int}                # DataFrame row of the current run
     live     ::Base.RefValue{Any}                # LiveFigure, LiveImage or nothing
+    last_rebuild ::Base.RefValue{Float64}        # time of the last figure rebuild
 
     # Outputs
     plot   ::Observable{Any}                     # Figure or message div
@@ -161,6 +171,7 @@ function Dashboard(ws::DataWorkspace, session::Session)
         Ref{Any}(nothing),
         Ref(1),
         Ref{Any}(nothing),
+        Ref(0.0),
 
         Observable{Any}(DOM.div("Loading…")),
         Observable{Any}(DOM.div()),
@@ -236,7 +247,19 @@ end
 function layout_key(cfg::PlotConfig, data)
     sizes = sort!([k => size(v) for (k, v) in data])
     cfg.Ndim == "1D" && return ("1D", cfg.fields1d, cfg.cut_axis, cfg.cut_mean, cfg.fig_base, sizes)
-    return (cfg.Ndim, cfg.cmap, cfg.heatmap, cfg.overlays, cfg.fig_base, sizes)
+    overlays = [(o.field, o.alpha, o.stepp, o.nematic, o.color) for o in cfg.overlays]  # not arrowsize
+    return (cfg.Ndim, cfg.cmap, cfg.heatmap, overlays, cfg.fig_base, sizes)
+end
+
+# Wait before a rebuild (see REBUILD_SETTLE). false: the controls moved again
+# meanwhile — skip, the renderer runs again with the newer values.
+function settle_before_rebuild(d::Dashboard)
+    sleep(REBUILD_SETTLE)
+    gap = d.last_rebuild[] + MIN_REBUILD_GAP - time()
+    gap > 0 && sleep(gap)
+    d.renderer.pending && return false
+    d.last_rebuild[] = time()
+    return true
 end
 
 function render_fields!(d::Dashboard, cfg)
@@ -247,13 +270,16 @@ function render_fields!(d::Dashboard, cfg)
     key  = layout_key(cfg, data)
     live = d.live[]
     if live isa LiveFigure && live.key == key
+        live.style[].overlays != cfg.overlays && (live.style[] = cfg)   # arrow sizes, in place
         live.data[] = data                      # in place: only arrays go to the browser
     else
-        obs = Observable{Dict{String,Any}}(data)
-        fig = plot_frame(obs, cfg; max_cells=cfg.fig_base)
+        settle_before_rebuild(d) || return
+        obs   = Observable{Dict{String,Any}}(data)
+        style = Observable(cfg)
+        fig   = plot_frame(obs, cfg; max_cells=cfg.fig_base, style)
         fig isa AbstractString && return show!(d, DOM.div(fig))
         show!(d, fig)
-        d.live[] = LiveFigure(key, obs)
+        d.live[] = LiveFigure(key, obs, style)
     end
     return
 end
@@ -267,6 +293,7 @@ function render_run!(d::Dashboard, cfg)
     if live isa LiveRun && live.key == key
         live.frame[] = cfg.nfile
     else
+        settle_before_rebuild(d) || return
         frame = Observable(cfg.nfile)
         fig   = plot_run(run_profiles(d.pathdir[], cfg, d.ws.ext), cfg; frame)
         fig isa AbstractString && return show!(d, DOM.div(fig))

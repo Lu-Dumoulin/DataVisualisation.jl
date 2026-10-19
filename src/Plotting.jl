@@ -179,20 +179,22 @@ function arrow_dirs(field, x, y, is_nematic)
 end
 
 # Arrows of normalized length: at arrow size 5 the longest spans one arrow spacing.
+# `scale` may be an Observable, so the arrow size can change without a rebuild.
 function draw_arrows!(ax, field, stepp, arrowsize_factor, is_nematic;
-                      color=is_nematic ? :white : :black)
+                      color=is_nematic ? :white : :black, scale=arrow_scale(stepp, arrowsize_factor))
     field  = as_obs(field)
     Nx, Ny = size(field[])[1:2]
     x, y   = 1:stepp:Nx, 1:stepp:Ny
     points = vec([Point2f(i, j) for i in x, j in y])
     dirs   = lift(f -> arrow_dirs(f, x, y, is_nematic), field)
-    scale  = stepp * arrowsize_factor / 5
     if is_nematic
         arrows2d!(ax, points, dirs; lengthscale=scale, align=:center, tiplength=0, color)
     else
         arrows2d!(ax, points, dirs; lengthscale=scale, align=:center, color)
     end
 end
+
+arrow_scale(stepp, arrowsize) = stepp * arrowsize / 5
 
 # "max |P| = 0.832   max |Q| = 1.0" for the vector overlays of a frame.
 function arrows_title(data, overlays)
@@ -206,9 +208,10 @@ function arrows_title(data, overlays)
     return join(parts, "   ")
 end
 
-function draw_overlay!(ax, field, o::OverlayConfig; max_cells=typemax(Int))
+function draw_overlay!(ax, field, o::OverlayConfig; max_cells=typemax(Int),
+                       scale=arrow_scale(o.stepp, o.arrowsize))
     field = as_obs(field)
-    ndims(field[]) > 2 && draw_arrows!(ax, field, o.stepp, o.arrowsize, o.nematic; color=Symbol(o.color))
+    ndims(field[]) > 2 && draw_arrows!(ax, field, o.stepp, o.arrowsize, o.nematic; color=Symbol(o.color), scale)
     overlay_alpha!(ax, field, o.alpha; max_cells)
 end
 
@@ -216,11 +219,13 @@ end
 # ── Figures ───────────────────────────────────────────────────────────────────
 
 # Figure for one frame (in 3D: one slice, already cut by slice_frame).
+# `style` (an Observable{PlotConfig}) carries what can change in place besides
+# the data — the arrow sizes.
 # `data` may be an Observable{Dict}: setting data[] to the
 # next frame (same fields and sizes) redraws in place — that's how the live view
 # animates. Shared with the PNG export (plain Dict, full resolution), so saved
 # images look like the screen. max_cells caps the heatmap/mask resolution.
-function plot_frame(data, cfg::PlotConfig; max_cells=typemax(Int))
+function plot_frame(data, cfg::PlotConfig; max_cells=typemax(Int), style=Observable(cfg))
     cfg.Ndim == "1D" && return plot_profiles(data, cfg)
     cfg.Ndim in ("2D", "3D") || return "$(cfg.Ndim) view not implemented yet"
 
@@ -242,9 +247,10 @@ function plot_frame(data, cfg::PlotConfig; max_cells=typemax(Int))
     hm = heatmap!(ax, edges(Nx, nx), edges(Ny, ny), heat; colormap=cfg.cmap)
     Colorbar(fig[:,end+1], hm)
 
-    for o in cfg.overlays
+    for (i, o) in enumerate(cfg.overlays)
         o.field == "None" && continue
-        draw_overlay!(ax, lift(d -> d[o.field], data), o; max_cells)
+        scale = lift(c -> arrow_scale(c.overlays[i].stepp, c.overlays[i].arrowsize), style)
+        draw_overlay!(ax, lift(d -> d[o.field], data), o; max_cells, scale)
     end
     return fig
 end

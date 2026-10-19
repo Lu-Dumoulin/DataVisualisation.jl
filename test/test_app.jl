@@ -462,6 +462,35 @@ end
     end
 end
 
+@testset "arrow size updates in place; fast layout changes rebuild once" begin
+    with_dashboard() do d
+        o = d.overlays[1]
+        d.menus[].overlays[1].value[] = "v"
+        @test waitfor(() -> plot_kinds(d) == [Makie.heatmap, Makie.arrows2d])
+        fig    = plot_fig(d)
+        arrows = axis_of(fig).scene.plots[2]
+        @test arrows.lengthscale[] == DV.arrow_scale(20, 5)
+
+        for k in 1:15                                   # a fast drag of the arrow size
+            o.arrowsize.value[] = k
+            sleep(0.02)
+        end
+        @test waitfor(() -> arrows.lengthscale[] == DV.arrow_scale(20, 15))
+        @test plot_fig(d) === fig                       # same figure, no rebuild
+
+        builds = Ref(0)                                 # figures put on screen from now on
+        on(p -> p isa Makie.Figure && p !== fig && (builds[] += 1), d.plot)
+        for k in 1:20                                   # a fast drag of the arrow step (layout)
+            o.stepp.value[] = [5, 10, 15, 20, 25][mod1(k, 5)]
+            sleep(0.02)
+        end
+        @test waitfor(() -> builds[] >= 1 && !d.renderer.active)
+        sleep(1)
+        @test builds[] == 1                             # one rebuild, after the drag
+        @test length(axis_of(plot_fig(d)).scene.plots[2][1][]) == length(1:25:NX) * length(1:25:NY)
+    end
+end
+
 @testset "player never skips a frame" begin
     with_dashboard() do d
         shown = Int[]

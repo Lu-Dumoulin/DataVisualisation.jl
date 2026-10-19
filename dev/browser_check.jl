@@ -18,6 +18,9 @@
 #   png-play  same, in "Use PNG" mode (run Save all first)
 #   3d        switch to 3D, show the first 3D field, drag the slice slider;
 #             reports whether slice changes update the figure in place
+#   drag      show the first vector field as Overlay 1, then drag its arrow-size
+#             slider fast (60 moves, 25 ms apart); reports renders, rebuilt
+#             canvases and browser errors
 #   1d        switch to 1D, move the 2D cut, switch its axis, play 3 s;
 #             reports whether the figure is updated in place
 #
@@ -75,8 +78,8 @@ HTTP.WebSockets.open(wsurl; suppress_close_error=true) do sock
             args = join([get(a, "value", get(a, "description", "?")) for a in m["params"]["args"]], " ")
             push!(LOGS, "$(t())s console.$(m["params"]["type"]): $args")
         elseif m["method"] == "Runtime.exceptionThrown"
-            d = m["params"]["exceptionDetails"]
-            push!(LOGS, "$(t())s EXCEPTION: $(get(get(d, "exception", Dict()), "description", d["text"]))")
+            ex = m["params"]["exceptionDetails"]
+            push!(LOGS, "$(t())s EXCEPTION: $(get(get(ex, "exception", Dict()), "description", ex["text"]))")
         elseif m["method"] == "Log.entryAdded"
             occursin("GL Driver", m["params"]["entry"]["text"]) && continue
             push!(LOGS, "$(t())s log.$(m["params"]["entry"]["level"]): $(m["params"]["entry"]["text"])")
@@ -142,6 +145,32 @@ HTTP.WebSockets.open(wsurl; suppress_close_error=true) do sock
             println("      Julia z=$(d.z[])  screenshot: ", shot("3_slice$z"))
         end
         println("      WGL canvas recreated while slicing: $(context_resets() - resets0)×")
+
+    elseif SCENARIO == "drag"
+        d = DREF[]
+        vec = findfirst(k -> length(get(d.shapes[], k, ())) >= 3, d.current_keys[])
+        d.overlays[1].field[] = d.current_keys[][something(vec, 1)]; sleep(4)
+        # drag a slider of Overlay 1 fast: 60 moves, 25 ms apart (the first, innermost
+        # row whose text starts with `label`)
+        drag(label, n) = js("""(async () => {
+            const rows = [...document.querySelectorAll('div')].filter(e =>
+                e.textContent.trim().startsWith('$label') && e.querySelector('input[type=range]') &&
+                ![...e.children].some(c => c.textContent.trim().startsWith('$label')));
+            const s = rows[0].querySelector('input[type=range]');
+            for (let k = 0; k < 60; k++) {
+                s.value = 1 + (k % $n); s.dispatchEvent(new Event('input'));
+                await new Promise(r => setTimeout(r, 25));
+            } })()""")
+        nerr() = count(l -> occursin(r"EXCEPTION|error"i, l), LOGS)
+        for (label, n, what) in (("Arrow size:", 15, "size (in place)"), ("Arrows step:", 5, "step (rebuilds)"))
+            resets0, renders0, errs0 = context_resets(), length(RENDERS), nerr()
+            println("$(t())s dragging arrow $what of overlay 1 ($(d.overlays[1].field[]))")
+            drag(label, n); sleep(8)
+            println("$(t())s after drag: $(length(RENDERS) - renders0) renders, canvas recreated ",
+                    "$(context_resets() - resets0)×, new browser errors: $(nerr() - errs0), ",
+                    "arrowsize=$(d.overlays[1].arrowsize.value[]) step=$(d.overlays[1].stepp.value[])")
+        end
+        state("after drag"); println("      screenshot: ", shot("2_drag"))
 
     elseif SCENARIO == "1d"
         d = DREF[]
