@@ -1,5 +1,7 @@
 # DataVisualisation.jl
 
+[![CI](https://github.com/Lu-Dumoulin/DataVisualisation.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/Lu-Dumoulin/DataVisualisation.jl/actions/workflows/CI.yml)
+
 Interactive parameter-space explorer for 1D, 2D and 3D simulation ensembles.
 Built on [Bonito](https://github.com/SimonDanisch/Bonito.jl) and [WGLMakie](https://docs.makie.org/stable/), it works both as a standalone web app and embedded in a [Pluto](https://plutojl.org/) notebook.
 
@@ -9,13 +11,14 @@ Built on [Bonito](https://github.com/SimonDanisch/Bonito.jl) and [WGLMakie](http
 
 - **Parameter-space navigation** — sliders and dropdowns reflect every varying parameter in your simulation ensemble; the app snaps to the nearest available run, keeping the parameter you just changed
 - **Pin checkboxes** — lock any parameter to prevent it from being snapped away while you sweep another
-- **2D heatmap** — any scalar or vector field (norm displayed for vector), with free colormap selection
+- **2D heatmap** — any scalar or vector field (norm displayed for vector), with free colormap selection and an optional **colour range over the whole run** (computed in the background, cached)
 - **Two independent overlays** — arrows for vector fields (polar or nematic/headless), normalized by the field's max norm (shown above the plot), black or white, with per-overlay transparency mask and step/size controls
 - **3D** — one z-slice at a time with a **Slice z** slider, for 3D fields and stacks of 2D fields
 - **1D** — profiles, kymograph or times overlaid, for 1D fields and for cuts through 2D fields
 - **Smooth animation** — frames, slices and cuts update the figure in place; play/pause with an fps limit, never skipping a frame; large heatmaps are downscaled to the canvas
 - **Aspect-ratio-aware figures** — canvas size is computed from the field's `(Nx, Ny)` dimensions, with a tunable base size slider
-- **Export** — save every frame of the current run as a PNG via CairoMakie in one click, and replay the PNGs
+- **Value under the cursor** — hover the plot to read the exact values (full resolution) of the shown fields at that point
+- **Export** — every frame as PNG (and replay them), the run as an MP4 movie of the current view, or the current frame as a PDF
 - **Demo data** — a generated ensemble to try the app without simulations (`julia demo.jl`)
 - **Pluto embedding** — `scale` kwarg shrinks the whole UI to fit inside a notebook cell
 
@@ -27,7 +30,7 @@ Built on [Bonito](https://github.com/SimonDanisch/Bonito.jl) and [WGLMakie](http
 ]add https://github.com/Lu-Dumoulin/DataVisualisation.jl
 ```
 
-Or, from a clone of this repository, `julia run.jl` (edit the `DF.csv` path inside) runs the dashboard from the checkout itself, whatever your global environment holds.
+Requires Julia ≥ 1.13. Or, from a clone of this repository, `julia run.jl` (edit the `DF.csv` path inside) runs the dashboard from the checkout itself, whatever your global environment holds.
 
 ---
 
@@ -66,7 +69,7 @@ Each `.jld` file must contain the field arrays keyed by name (e.g. `"vx"`, `"vy"
 | `(Nx, Ny, Nz)`, `Nz ≠ 2` | 3D scalar, or a stack of 2D fields (e.g. phase fields) | one z-slice, chosen with the **Slice z** slider |
 | `(Nx, Ny, Nz, c)` | 3D vector | one z-slice: heatmap = full norm, arrows = in-plane (x, y) components |
 
-Changing the slice updates the figure in place, like changing the frame; *Save all* exports the current slice.
+Changing the slice updates the figure in place, like changing the frame; *Save all .png* exports the current slice.
 
 ### 1D view
 
@@ -170,12 +173,18 @@ Writes the demo ensemble and returns its `DF.csv` path — see [Try it without s
 │  ...         │                                           │
 │              │                                           │
 ├──────────────┴───────────────────────────────────────────┤
-│  Time ──●──  ▶  fps ──●──  ↺ Reset  💾 Save all  🖼 Use PNG│
+│  x = 104, y = 68 · rho = 0.84 · P = (0.3, -0.1)  ← cursor│
+│  Time ──●──  ▶  fps ──●──                                │
+│  ↺ Reset  💾 Save all .png  🖼 Use PNG  🎞 Movie  📄 PDF     │
 └──────────────────────────────────────────────────────────┘
 ```
 
 - **Overlay controls**: field selector, min-brightness slider (transparency mask), arrows step, arrow size, **Color** switch (black / white; overlay 1 black and overlay 2 white by default) and **Nematic?** (headless doubled-angle arrows). Arrows are normalized by the field's maximum norm (|Q| for nematic fields), which is shown above the plot for every frame — the longest arrow spans one arrow spacing at size 5. Fields whose max norm is below 1e-6 (numerical noise) get no arrows.
-- **Save all**: exports every frame of the current run to a `../Fig/` folder as PNG using CairoMakie
+- **Run range** (2D / 3D, next to the colormap): the colour scale spans the min–max over every frame of the run (3D: the whole volume), so frames and slices can be compared. It is computed once per run and field in the background — reading only that field from each file, on another thread when Julia runs with several (`julia -t auto run.jl`) — with progress in the status line, then cached; playback, movies, PDFs and PNG exports use it. About 4 s for 51 frames of 2048×512.
+- **Value under the cursor**: the line under the plot shows the position and the values of the heatmap and overlay fields at the mouse (1D: all panels at that x; kymograph: x, t and the value), read from the full-resolution data and refreshed while playing
+- **Save all .png**: exports every frame of the current run to a `../Fig/` folder as PNG using CairoMakie
+- **Movie**: records the whole run with the current view and settings as `../Fig/<view>.mp4` (e.g. `rho_2D.mp4`, `rho_1D_Kymograph.mp4`), at the fps of the player
+- **PDF**: saves the current frame as `../Fig/<frame>_<view>.pdf` (vector arrows and text)
 - **Use PNG / Use Field**: toggles between recomputing from raw data and displaying pre-saved PNGs (shown as plain images: the fastest way to animate)
 - **▶ / fps**: plays the run at up to `fps` frames per second; a frame is never skipped — if drawing is slower, playback slows down instead. In field mode, frames update the figure in place, and heatmaps larger than the Fig size are block-averaged down to it (exported PNGs keep full resolution)
 
@@ -184,7 +193,7 @@ Writes the demo ensemble and returns its `DF.csv` path — see [Try it without s
 ## Development
 
 ```
-julia --project=. -e 'using Pkg; Pkg.test()'          # full test suite (~40 s)
+julia --project=. -e 'using Pkg; Pkg.test()'          # full test suite (~1 min); also run by CI on every push
 julia dev/browser_check.jl play path/to/DF.csv out/ 24 # drive the app in headless Chrome
 ```
 

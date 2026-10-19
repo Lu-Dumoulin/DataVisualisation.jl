@@ -24,7 +24,9 @@ using PrecompileTools: @setup_workload, @compile_workload
 
     @compile_workload begin
         ws = DataWorkspace(joinpath(root, "DF.csv"), ".jld")
-        s  = Bonito.Session()
+        # no connection, assets inlined: the default asset server would start an
+        # HTTP server whose timer precompilation then waits for
+        s  = Bonito.Session(Bonito.NoConnection(); asset_server=Bonito.NoServer())
         d  = Dashboard(ws, s)
         Bonito.session_dom(s, layout(d))            # the page, with every widget
 

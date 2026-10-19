@@ -27,6 +27,7 @@ Base.@kwdef struct PlotConfig
     cut_pos  ::Int                     #   at this index of the other axis (clamped)…
     cut_mean ::Bool                    #   …or averaged over the other axis
     view1d   ::String                  # 1D: "Profiles", "Kymograph" or "Times overlaid"
+    colorrange ::Union{Nothing,Tuple{Float64,Float64}}   # heatmap colour range; nothing = per frame
 end
 
 # Copy of cfg with some fields replaced, e.g. with(cfg; nfile=3).
@@ -40,6 +41,16 @@ end
 # ==============================================================================
 # DataWorkspace — all dataset state, computed once at construction time
 # ==============================================================================
+
+# Colour ranges over whole runs, computed in the background on demand and
+# shared by every session of the workspace. key → (min, max), or :none when
+# the field has no finite value; `tasks` holds the computations in flight.
+struct RangeCache
+    values ::Dict{Any,Any}
+    tasks  ::Dict{Any,Task}
+    lock   ::ReentrantLock
+end
+RangeCache() = RangeCache(Dict{Any,Any}(), Dict{Any,Task}(), ReentrantLock())
 
 struct DataWorkspace
     df                     ::DataFrame
@@ -55,6 +66,7 @@ struct DataWorkspace
     all_keys               ::Vector{String}
     all_cmaps              ::Vector{String}
     ranges                 ::Vector{Float64}
+    run_ranges             ::RangeCache
 
     function DataWorkspace(path_to_csv::String, ext::String)
         dir, name_csv = mysplitpath(path_to_csv)
@@ -77,7 +89,7 @@ struct DataWorkspace
         ranges = [col_range(df, v) for v in changing_variable_list]
 
         return new(df, dir, name_csv, ext, var_list, tab_list, changing_variable_list,
-                   N_changing, all_dir, Nfiles, all_keys, all_cmaps, ranges)
+                   N_changing, all_dir, Nfiles, all_keys, all_cmaps, ranges, RangeCache())
     end
 end
 

@@ -18,10 +18,20 @@ function frame_path(dir, n, ext)
     return joinpath(dir, files[clamp(n, 1, length(files))])
 end
 
+# Frame files are read with JLD2 directly, not FileIO: FileIO guesses the format
+# from the first bytes and takes some JLD2 files (e.g. PS_FFT_P, P_IBM) for old
+# JLD files it then cannot open.
+
 # Size of every field stored in one frame file. Only numeric arrays count:
 # files can also hold metadata (e.g. a JLD2 `_creator` group) that can't be plotted.
-field_shapes(path) = Dict{String,Tuple}(k => size(v) for (k, v) in FileIO.load(path)
-                                        if v isa AbstractArray{<:Real})
+field_shapes(path) = jldopen(path, "r") do f
+    shapes = Dict{String,Tuple}()
+    for k in keys(f)
+        v = f[k]
+        v isa AbstractArray{<:Real} && (shapes[k] = size(v))
+    end
+    shapes
+end
 
 # Sorted field names stored in one frame file.
 field_keys(path) = sort!(collect(keys(field_shapes(path))))
@@ -33,10 +43,7 @@ png_path(dir, frame_file) = joinpath(fig_dir(dir), splitext(basename(frame_file)
 # Load only the keys needed from a frame file (single file open).
 function load_fields(path, keys_needed)
     isempty(keys_needed) && return Dict{String,Any}()
-    raw = FileIO.load(path, keys_needed...)
-    return length(keys_needed) == 1 ?
-        Dict(keys_needed[1] => raw) :
-        Dict(zip(keys_needed, raw))
+    return jldopen(f -> Dict{String,Any}(k => f[k] for k in keys_needed), path, "r")
 end
 
 # Fields used by cfg for its frame, or a message saying why there is nothing to plot.
@@ -110,6 +117,34 @@ reduce_frame(data, cfg::PlotConfig) =
 
 # Scalar field, or the norm of a vector field (Nx, Ny, c).
 heatmap_field(f) = ndims(f) > 2 ? dropdims(sqrt.(sum(f.^2; dims=3)); dims=3) : f
+
+# ── Colour range over a whole run ─────────────────────────────────────────────
+
+# What the heatmap of field A shows, before slicing / downsampling: the field,
+# or its norm. In 3D the whole volume, so every slice uses the same range.
+range_values(A, Ndim) =
+    Ndim == "3D" && ndims(A) == 4        ? sqrt.(sum(abs2, A; dims=4)) :
+    Ndim == "3D" && depth(size(A)) > 1   ? A :
+    heatmap_field(A)
+
+# (min, max) of what the heatmap of `field` shows, over every frame of the run
+# in `dir`, reading only that field from each file; nothing if no finite value.
+# `progress` (a Threads.Atomic{Int}) counts the frames done.
+function run_range(dir, field, Ndim, ext; progress=nothing)
+    lo, hi = Inf, -Inf
+    for (i, f) in enumerate(frame_files(dir, ext))
+        for v in range_values(load_fields(joinpath(dir, f), [field])[field], Ndim)
+            isfinite(v) || continue
+            v < lo && (lo = v)
+            v > hi && (hi = v)
+        end
+        isnothing(progress) || (progress[] = i)
+    end
+    isfinite(lo) || return nothing
+    lo == hi && return (Float64(lo) - 0.5, Float64(hi) + 0.5)   # constant field: a usable range
+    return (Float64(lo), Float64(hi))
+end
+
 
 # Block-average so that A has at most max_cells cells along each axis. A canvas
 # ~fig_base px wide can't show more, and every cell is sent to the browser on
@@ -244,7 +279,10 @@ function plot_frame(data, cfg::PlotConfig; max_cells=typemax(Int), style=Observa
 
     heat = lift(d -> downsample(heatmap_field(d[cfg.heatmap]), max_cells), data)
     nx, ny = size(heat[])
-    hm = heatmap!(ax, edges(Nx, nx), edges(Ny, ny), heat; colormap=cfg.cmap)
+    hm = isnothing(cfg.colorrange) ?
+        heatmap!(ax, edges(Nx, nx), edges(Ny, ny), heat; colormap=cfg.cmap) :
+        heatmap!(ax, edges(Nx, nx), edges(Ny, ny), heat; colormap=cfg.cmap,
+                 colorrange=lift(c -> c.colorrange, style))          # run range, updated in place
     Colorbar(fig[:,end+1], hm)
 
     for (i, o) in enumerate(cfg.overlays)
@@ -347,6 +385,49 @@ function field_view(dir, cfg::PlotConfig, ext)
     return plot_frame(reduce_frame(data, cfg), cfg)
 end
 
+# ── Value under the cursor ────────────────────────────────────────────────────
+# Read from the current frame at full resolution (the heatmap on screen may be
+# downsampled). Each returns "" when the point is outside the data.
+
+fmt(v) = string(round(Float64(v); sigdigits=4))      # Float64: no Float32 digits like 1.3200001e-10
+
+# "rho = 0.843" for a scalar, "P = (0.31, -0.12)" for a vector, at one grid cell
+cell_text(name, f, i, j) = ndims(f) == 2 ? "$name = $(fmt(f[i, j]))" :
+    "$name = (" * join((fmt(f[i, j, c]) for c in axes(f, 3)), ", ") * ")"
+
+# 2D / 3D: data coordinates p → grid cell → heatmap field and overlay fields.
+function cursor_text(data, cfg::PlotConfig, p)
+    A = get(data, cfg.heatmap, nothing)
+    (isnothing(A) || ndims(A) < 2 || !all(isfinite, p)) && return ""
+    i, j = round.(Int, (p[1], p[2]))
+    (1 <= i <= size(A, 1) && 1 <= j <= size(A, 2)) || return ""
+    pos = cfg.Ndim == "3D" ? "x = $i, y = $j, z = $(cfg.zslice)" : "x = $i, y = $j"
+    names = unique([cfg.heatmap; [o.field for o in cfg.overlays if o.field != "None"]])
+    cells = [cell_text(k, data[k], i, j) for k in names
+             if haskey(data, k) && ndims(data[k]) in (2, 3) && size(data[k])[1:2] == size(A)[1:2]]
+    return join([pos; cells], "  ·  ")
+end
+
+# 1D profiles: x → every profile at that point.
+function cursor_text_1d(data, cfg::PlotConfig, x)
+    names = [k for k in cfg.fields1d if haskey(data, k)]
+    (isempty(names) || !isfinite(x)) && return ""
+    i = round(Int, x)
+    n = length(data[names[1]])
+    1 <= i <= n || return ""
+    return join(["$(cfg.cut_axis) = $i"; ["$k = $(fmt(data[k][i]))" for k in names if length(data[k]) >= i]], "  ·  ")
+end
+
+# Kymograph / times overlaid: (x, t) → the value of field `name` at the nearest frame.
+function cursor_text_run(run, name, p)
+    all(isfinite, p) || return ""
+    A = run.fields[name]
+    i = round(Int, p[1])
+    k = argmin(abs.(run.times .- p[2]))
+    1 <= i <= size(A, 1) || return ""
+    return "x = $i  ·  t = $(fmt(run.times[k]))  ·  $name = $(fmt(A[i, k]))"
+end
+
 # Exported PNG for cfg's frame: (file=path, msg=nothing) or (file=nothing, msg=why not).
 function png_file(dir, cfg::PlotConfig, ext)
     path = frame_path(dir, cfg.nfile, ext)
@@ -392,3 +473,57 @@ function save_frames(on_progress, dir, cfg::PlotConfig, ext)
 end
 
 save_frames(dir, cfg::PlotConfig, ext) = save_frames((_, _) -> nothing, dir, cfg, ext)
+
+
+# ── Movie and single-frame exports (CairoMakie, into fig_dir) ─────────────────
+
+# File name describing the view: "rho_2D", "s3_3D_z7", "rho-v_1D_Kymograph".
+function export_name(cfg::PlotConfig)
+    cfg.Ndim == "1D" && return join(cfg.fields1d, "-") * "_1D_" * replace(cfg.view1d, ' ' => '-')
+    cfg.Ndim == "3D" && return "$(cfg.heatmap)_3D_z$(cfg.zslice)"
+    return "$(cfg.heatmap)_$(cfg.Ndim)"
+end
+
+# The current frame as a PDF (vector arrows and text, embedded raster heatmap).
+# Returns (file=path, msg=nothing) or (file=nothing, msg=why not).
+function save_frame_pdf(dir, cfg::PlotConfig, ext)
+    fig = field_view(dir, cfg, ext)
+    fig isa AbstractString && return (file=nothing, msg=fig)
+    frame = splitext(basename(frame_path(dir, cfg.nfile, ext)))[1]
+    out   = joinpath(mkpath(fig_dir(dir)), "$(frame)_$(export_name(cfg)).pdf")
+    Cairo.save(out, fig; backend=Cairo)
+    return (file=out, msg=nothing)
+end
+
+# Every frame of the run, with the current view and settings, as an MP4 movie.
+# The figure is built once and updated in place frame by frame, like playback.
+# on_progress(i, N) is called after each frame.
+function save_movie(on_progress, dir, cfg::PlotConfig, ext; framerate=10)
+    n = length(frame_files(dir, ext))
+    n == 0 && return (file=nothing, msg=isdir(dir) ? "No files in: $dir" : "No directory: $dir")
+    if run_view(cfg)                                 # kymograph / times overlaid: the marker moves
+        run = run_profiles(dir, cfg, ext)
+        run isa AbstractString && return (file=nothing, msg=run)
+        frame = Observable(1)
+        fig   = plot_run(run, with(cfg; nfile=1); frame)
+        show_frame! = i -> (frame[] = i)
+    else
+        first = load_frame(dir, with(cfg; nfile=1), ext)
+        first isa AbstractString && return (file=nothing, msg=first)
+        data  = Observable{Dict{String,Any}}(reduce_frame(first, cfg))
+        fig   = plot_frame(data, cfg)
+        fig isa AbstractString && return (file=nothing, msg=fig)
+        show_frame! = function (i)
+            raw = load_frame(dir, with(cfg; nfile=i), ext)
+            raw isa AbstractString || (data[] = reduce_frame(raw, cfg))
+        end
+    end
+    out = joinpath(mkpath(fig_dir(dir)), export_name(cfg) * ".mp4")
+    Makie.record(fig, out, 1:n; framerate, backend=Cairo) do i
+        show_frame!(i)
+        on_progress(i, n)
+    end
+    return (file=out, msg=nothing)
+end
+
+save_movie(dir, cfg::PlotConfig, ext; kw...) = save_movie((_, _) -> nothing, dir, cfg, ext; kw...)

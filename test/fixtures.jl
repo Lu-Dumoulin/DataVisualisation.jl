@@ -101,7 +101,8 @@ overlay(; kw...) = DV.OverlayConfig(; merge(
 
 test_config(; overlays=[overlay(), overlay()], kw...) = DV.PlotConfig(; merge(
     (Ndim="2D", nfile=1, cmap="viridis", heatmap="rho", overlays, fig_base=400, zslice=1,
-     fields1d=["rho"], cut_axis="x", cut_pos=1, cut_mean=false, view1d="Profiles"), values(kw))...)
+     fields1d=["rho"], cut_axis="x", cut_pos=1, cut_mean=false, view1d="Profiles",
+     colorrange=nothing), values(kw))...)
 
 
 # ── Headless dashboard ────────────────────────────────────────────────────────

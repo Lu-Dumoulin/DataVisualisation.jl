@@ -491,6 +491,84 @@ end
     end
 end
 
+# put the (simulated) mouse in the middle of axis k of the figure on screen
+function hover_middle!(d; k=1)
+    fig = d.plot[]
+    Makie.update_state_before_display!(fig)
+    ax  = [c for c in fig.content if c isa Makie.Axis][k]
+    vp  = ax.scene.viewport[]
+    Makie.events(fig).mouseposition[] = Tuple(Float64.(vp.origin .+ vp.widths ./ 2))
+end
+
+@testset "value under the cursor" begin
+    with_dashboard() do d                                 # 2D
+        d.menus[].heatmap.value[] = "v"
+        @test waitfor(() -> heat_is(d, vnorm(1, 1)))
+        hover_middle!(d)
+        @test waitfor(() -> occursin("v = (1.0, 1.0)", d.cursor[]))
+        @test startswith(d.cursor[], "x = ")
+        d.nfile.value[] = 2                               # new frame, mouse still → follows
+        @test waitfor(() -> occursin("v = (1.0, 2.0)", d.cursor[]))
+        Makie.events(d.plot[]).mouseposition[] = (1.0, 1.0)   # outside the axis
+        @test waitfor(() -> d.cursor[] == "")
+
+        d.dim.value[] = "1D"                              # 1D profiles
+        @test waitfor(() -> d.live[] isa DV.LiveFigure && d.live[].key[1] == "1D")
+        hover_middle!(d)
+        @test waitfor(() -> startswith(d.cursor[], "x = ") && occursin("rho = ", d.cursor[]))
+
+        d.menus1d[].view.value[] = "Kymograph"            # whole-run view
+        @test waitfor(() -> d.live[] isa DV.LiveRun)
+        hover_middle!(d)
+        @test waitfor(() -> occursin("t = ", d.cursor[]))
+        d.menus1d[].view.value[] = "Times overlaid"
+        @test waitfor(() -> d.live[] isa DV.LiveRun && d.live[].key[2] == "Times overlaid")
+        hover_middle!(d)
+        @test waitfor(() -> occursin("t = 2.0", d.cursor[]))   # the current frame's time
+    end
+end
+
+@testset "colour range over the run" begin
+    root = make_dataset()
+    ws   = DataWorkspace(joinpath(root, "DF.csv"), ".jld")
+    hm(d) = axis_of(plot_fig(d)).scene.plots[1]
+    with_dashboard(ws) do d
+        d.menus[].heatmap.value[] = "rho"
+        @test waitfor(() -> d.live[] isa DV.LiveFigure && d.live[].key[3] == "rho")
+        @test isnothing(DV.plot_config(d).colorrange)
+
+        d.fixed_range.value[] = true                       # computed in the background…
+        @test waitfor(() -> startswith(dom_text(d.status[]), "✓ Colour range of rho"))
+        @test waitfor(() -> plot_fig(d) !== nothing && collect(hm(d).colorrange[]) ≈ [3, 39])
+        @test DV.plot_config(d).colorrange == (3.0, 39.0)
+        fig = plot_fig(d)
+        d.nfile.value[] = 3                                # …then frames keep it, in place
+        @test waitfor(() -> heat_is(d, frame_fields(1, 3)["rho"]))
+        @test plot_fig(d) === fig && collect(hm(d).colorrange[]) ≈ [3, 39]
+
+        d.menus[].heatmap.value[] = "v"                    # another field: its own range
+        @test waitfor(() -> plot_fig(d) !== nothing && d.live[] isa DV.LiveFigure &&
+                            d.live[].key[3] == "v" && collect(hm(d).colorrange[])[2] ≈ hypot(1, 3))
+        @test length(ws.run_ranges.values) == 2 && isempty(ws.run_ranges.tasks)
+
+        s2 = Bonito.Session()                              # another tab: cached, no recomputation
+        d2 = DV.Dashboard(ws, s2)
+        d2.fixed_range.value[] = true
+        d2.heatmap[] = "rho"
+        @test DV.plot_config(d2).colorrange == (3.0, 39.0)
+        close(s2)
+
+        d.heatmap[] = "not_a_field"                        # a failure is reported, not retried
+        @test waitfor(() -> startswith(dom_text(d.status[]), "⚠ Colour range of not_a_field failed"))
+        @test any(==(:none), values(ws.run_ranges.values))
+        d.heatmap[] = "rho"
+
+        d.fixed_range.value[] = false                      # back to per-frame colours
+        @test waitfor(() -> plot_fig(d) !== nothing && hm(d).colorrange[] isa Makie.Automatic &&
+                            isnothing(DV.plot_config(d).colorrange))
+    end
+end
+
 @testset "player never skips a frame" begin
     with_dashboard() do d
         shown = Int[]
@@ -602,5 +680,36 @@ end
             @test waitfor(() -> startswith(plot_msg(d), "Error"))
         end
         @test d.current_keys[] == WS.all_keys            # unchanged
+    end
+end
+
+@testset "movie and PDF buttons" begin
+    root = make_dataset()
+    ws   = DataWorkspace(joinpath(root, "DF.csv"), ".jld")
+    with_dashboard(ws) do d
+        figs = DV.fig_dir(d.pathdir[])
+        d.movie.value[] = true
+        @test waitfor(() -> startswith(dom_text(d.status[]), "✓ Movie saved"); timeout=120)
+        @test isfile(joinpath(figs, "Q_2D.mp4"))
+        d.pdf.value[] = true
+        @test waitfor(() -> startswith(dom_text(d.status[]), "✓ PDF saved"); timeout=60)
+        @test isfile(joinpath(figs, "t0001_Q_2D.pdf"))
+
+        # one export at a time
+        d.exporting[] = true
+        DV.save_pdf!(d)
+        @test startswith(dom_text(d.status[]), "An export is already running")
+        d.exporting[] = false
+        d.pathdir[] = joinpath(root, "nope")
+        DV.save_movie!(d)
+        @test startswith(dom_text(d.status[]), "No directory")
+        DV.save_pdf!(d)
+        @test startswith(dom_text(d.status[]), "No directory")
+        @test !d.exporting[]
+        d.pathdir[] = DV.run_path(ws, 1)                       # an error is reported, not lost
+        d.heatmap[] = "not_a_field"
+        DV.save_movie!(d)
+        @test startswith(dom_text(d.status[]), "⚠ Export failed")
+        @test !d.exporting[]
     end
 end

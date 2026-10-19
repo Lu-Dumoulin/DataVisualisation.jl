@@ -1,0 +1,524 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>DataVisualisation.jl — how it works</title>
+<style>
+  @page { size: A4; margin: 16mm 15mm 16mm 15mm; }
+  :root { --ink:#1f2633; --muted:#5b6475; --line:#3d4a63; --julia:#eef3fb; --browser:#fbf4e4;
+          --pure:#eef7ee; --accent:#b0306a; --warn:#fdf0f0; --box:#ffffff; }
+  * { box-sizing: border-box; }
+  body { font: 10.5pt/1.45 -apple-system, "Helvetica Neue", Helvetica, Arial, sans-serif; color: var(--ink);
+         margin: 0; background: #fff; }
+  h1 { font-size: 22pt; margin: 0 0 2mm; letter-spacing: -0.01em; }
+  h2 { font-size: 14.5pt; margin: 7mm 0 2mm; padding-bottom: 1mm; border-bottom: 1.5px solid var(--line);
+       break-after: avoid; }
+  h2 + figure, h2 + p, h3 + p, h3 + ul { break-before: avoid; }
+  h3 { font-size: 11.5pt; margin: 5mm 0 1.5mm; }
+  p { margin: 1.5mm 0; }
+  .sub { color: var(--muted); margin-bottom: 4mm; }
+  .page { break-before: page; }
+  code { font: 9pt/1.3 "SF Mono", Menlo, monospace; background: #f1f3f7; padding: 0 2px; border-radius: 2px; }
+  table { border-collapse: collapse; width: 100%; margin: 2mm 0 3mm; font-size: 9.3pt; break-inside: avoid; }
+  th, td { border: 1px solid #c9cfda; padding: 1.2mm 2mm; text-align: left; vertical-align: top; }
+  th { background: #f1f3f7; font-weight: 600; }
+  figure { margin: 3mm 0 4mm; break-inside: avoid; }
+  figcaption { color: var(--muted); font-size: 9pt; margin-top: 1mm; }
+  svg { width: 100%; height: auto; display: block; }
+  svg text { font-family: -apple-system, "Helvetica Neue", Helvetica, Arial, sans-serif; fill: var(--ink); }
+  svg text.halo { paint-order: stroke; stroke: #fff; stroke-width: 4px; stroke-linejoin: round; }
+  .note { background: #f6f7fa; border-left: 3px solid var(--line); padding: 2mm 3mm; margin: 2.5mm 0; break-inside: avoid; }
+  .rule { background: var(--warn); border-left: 3px solid var(--accent); padding: 2mm 3mm; margin: 2mm 0; break-inside: avoid; }
+  ul, ol { margin: 1mm 0 2mm 5mm; padding-left: 4mm; }
+  li { margin: 0.6mm 0; }
+  .toc { columns: 2; column-gap: 8mm; font-size: 10pt; }
+  .toc div { margin: 0.6mm 0; }
+  .k { font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>DataVisualisation.jl — how it works</h1>
+<div class="sub">Architecture, state, events (clicks and drags), buffers and connections · describes the code after
+commit <code>c247d1b</code> plus value-under-cursor, movie/PDF export and the run colour range (2026-10-19) · Julia 1.13, Bonito 5.2 ·
+642 tests</div>
+
+<div class="toc">
+  <div>1. The big picture — layers</div>
+  <div>2. Start-up: from <code>explor_app</code> to the first figure</div>
+  <div>3. The state: <code>Dashboard</code></div>
+  <div>4. Events: from a click or a drag to a render</div>
+  <div>5. The Debouncer — why nothing ever queues up</div>
+  <div>6. <code>render!</code> — the decision tree</div>
+  <div>7. Buffers: where the data lives and for how long</div>
+  <div>8. Clicks and drags on a time line</div>
+  <div>9. Navigating parameter space: snapping</div>
+  <div>10. Rules that keep it working</div>
+  <div>11. Where to change what · how to test it</div>
+</div>
+
+<p>The dashboard is a <span class="k">Julia program that drives a web page</span>. All decisions are taken in Julia;
+the browser only shows widgets and figures and reports what the user does. Bonito keeps
+<em>observables</em> (values that notify listeners when they change) in sync between the two sides over a
+WebSocket; WGLMakie turns Makie figures into WebGL canvases on the page.</p>
+
+<!-- ───────────────────────────── 1. Layers ───────────────────────────── -->
+<h2>1. The big picture — layers</h2>
+<figure>
+<svg viewBox="0 0 720 540" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" fill="#3d4a63"/></marker></defs>
+  <!-- browser -->
+  <rect x="10" y="10" width="700" height="125" rx="8" fill="#fbf4e4" stroke="#c9a64b"/>
+  <text x="22" y="30" font-weight="600" font-size="13">Browser — one tab = one Bonito session</text>
+  <rect x="25" y="42" width="205" height="80" rx="5" fill="#fff" stroke="#3d4a63"/>
+  <text x="37" y="62" font-weight="600" font-size="12">Widgets</text>
+  <text x="37" y="80" font-size="11">sliders · dropdowns · checkboxes</text>
+  <text x="37" y="96" font-size="11">switches · buttons</text>
+  <text x="37" y="112" font-size="10" fill="#5b6475">show their index, report changes</text>
+  <rect x="245" y="42" width="235" height="80" rx="5" fill="#fff" stroke="#3d4a63"/>
+  <text x="257" y="62" font-weight="600" font-size="12">Plot panel</text>
+  <text x="257" y="80" font-size="11">WGLMakie canvas (WebGL)</text>
+  <text x="257" y="96" font-size="11">or &lt;img&gt; in PNG mode, or a message</text>
+  <text x="257" y="112" font-size="10" fill="#5b6475">GPU buffers updated in place</text>
+  <rect x="495" y="42" width="200" height="80" rx="5" fill="#fff" stroke="#3d4a63"/>
+  <text x="507" y="62" font-weight="600" font-size="12">Bonito JS</text>
+  <text x="507" y="80" font-size="11">mirrors Julia observables</text>
+  <text x="507" y="96" font-size="11">applies DOM updates</text>
+  <!-- websocket -->
+  <line x1="300" y1="137" x2="300" y2="173" stroke="#3d4a63" stroke-width="2" marker-end="url(#a1)"/>
+  <line x1="420" y1="173" x2="420" y2="137" stroke="#3d4a63" stroke-width="2" marker-end="url(#a1)"/>
+  <text x="140" y="160" font-size="10.5" fill="#5b6475">widget values / indices</text>
+  <text x="430" y="160" font-size="10.5" fill="#5b6475">observable updates, new DOM, figure data</text>
+  <text x="318" y="160" font-size="10.5" font-weight="600">WebSocket</text>
+  <!-- julia -->
+  <rect x="10" y="175" width="700" height="300" rx="8" fill="#eef3fb" stroke="#7c93bf"/>
+  <text x="22" y="195" font-weight="600" font-size="13">Julia process — one Dashboard per session</text>
+  <rect x="25" y="205" width="670" height="52" rx="5" fill="#fff" stroke="#3d4a63"/>
+  <text x="37" y="224" font-weight="600" font-size="12">App.jl — wiring and page</text>
+  <text x="37" y="243" font-size="11">explor_app · layout(d): page structure · connect!(d): every listener (widget → schedule!), on_change</text>
+  <rect x="25" y="267" width="670" height="70" rx="5" fill="#fff" stroke="#3d4a63"/>
+  <text x="37" y="286" font-weight="600" font-size="12">State.jl — the Dashboard and what you can do with it</text>
+  <text x="37" y="305" font-size="11">state: selections (observables), widgets, outputs, live-figure handle · loops: renderer, snapper (Debouncers), player</text>
+  <text x="37" y="323" font-size="11">operations: render!, snap!, reload_keys!, save_all!, reset_view!, toggle_play!, top-bar builders</text>
+  <rect x="25" y="347" width="430" height="70" rx="5" fill="#eef7ee" stroke="#3d4a63"/>
+  <text x="37" y="366" font-weight="600" font-size="12">Plotting.jl — pure functions of (folder, PlotConfig)</text>
+  <text x="37" y="385" font-size="11">load_frame · reduce_frame (3D slice, 1D profile) · plot_frame</text>
+  <text x="37" y="402" font-size="11">plot_profiles · run_profiles · plot_run · png_file · save_frames</text>
+  <rect x="465" y="347" width="230" height="70" rx="5" fill="#fff" stroke="#3d4a63"/>
+  <text x="477" y="366" font-weight="600" font-size="12">Widgets.jl</text>
+  <text x="477" y="385" font-size="11">styles · OverlayControls</text>
+  <text x="477" y="402" font-size="11">set_value! · overlay_card</text>
+  <rect x="25" y="427" width="430" height="38" rx="5" fill="#eef7ee" stroke="#3d4a63"/>
+  <text x="37" y="450" font-size="11"><tspan font-weight="600">Types.jl</tspan> PlotConfig, DataWorkspace · <tspan font-weight="600">Utils.jl</tspan> nearest run, folder scan</text>
+  <rect x="465" y="427" width="230" height="38" rx="5" fill="#fff" stroke="#3d4a63" stroke-dasharray="4 3"/>
+  <text x="477" y="450" font-size="11">Import.jl · Demo.jl · precompile.jl</text>
+  <!-- disk -->
+  <rect x="10" y="490" width="700" height="42" rx="8" fill="#f4f4f4" stroke="#888"/>
+  <text x="22" y="516" font-size="11.5"><tspan font-weight="600">Disk</tspan>  DF.csv (one row per run) · &lt;run&gt;/Data/*.jld (one file per frame) · &lt;run&gt;/Fig/*.png (exports)</text>
+  <!-- arrows -->
+  <line x1="600" y1="257" x2="600" y2="265" stroke="#3d4a63" stroke-width="1.5" marker-end="url(#a1)"/>
+  <line x1="240" y1="337" x2="240" y2="345" stroke="#3d4a63" stroke-width="1.5" marker-end="url(#a1)"/>
+  <line x1="580" y1="337" x2="580" y2="345" stroke="#3d4a63" stroke-width="1.5" marker-end="url(#a1)"/>
+  <line x1="240" y1="417" x2="240" y2="425" stroke="#3d4a63" stroke-width="1.5" marker-end="url(#a1)"/>
+  <line x1="120" y1="465" x2="120" y2="488" stroke="#3d4a63" stroke-width="1.5" marker-end="url(#a1)"/>
+  <text x="128" y="482" font-size="10" fill="#5b6475">reads frames, writes PNGs</text>
+</svg>
+<figcaption>Figure 1 — Layers. Arrows point from caller to callee. Green boxes are pure (no widgets, no
+session): they are what the unit tests exercise directly.</figcaption>
+</figure>
+
+<p>The separation that matters: <span class="k">App.jl only connects</span> (a listener never does work
+itself, it schedules it), <span class="k">State.jl decides</span> (what to load, whether a figure can be
+updated in place), and <span class="k">Plotting.jl computes</span> from a folder and a
+<code>PlotConfig</code> — a plain snapshot of every setting, built in one place (<code>plot_config(d)</code>).
+Rendering never reads a widget directly.</p>
+
+<!-- ───────────────────────────── 2. Start-up ───────────────────────────── -->
+<h2>2. Start-up: from <code>explor_app</code> to the first figure</h2>
+<figure>
+<svg viewBox="0 0 720 400" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" fill="#3d4a63"/></marker></defs>
+  <g font-size="11.5" font-weight="600" text-anchor="middle">
+    <rect x="25" y="10" width="110" height="28" rx="4" fill="#fbf4e4" stroke="#c9a64b"/><text x="80" y="29">Browser</text>
+    <rect x="185" y="10" width="130" height="28" rx="4" fill="#fff" stroke="#3d4a63"/><text x="250" y="29">Bonito server</text>
+    <rect x="365" y="10" width="150" height="28" rx="4" fill="#eef3fb" stroke="#7c93bf"/><text x="440" y="29">App.jl / State.jl</text>
+    <rect x="565" y="10" width="130" height="28" rx="4" fill="#eef7ee" stroke="#3d4a63"/><text x="630" y="29">Plotting / disk</text>
+  </g>
+  <g stroke="#9aa3b5" stroke-dasharray="3 4"><line x1="80" y1="38" x2="80" y2="390"/><line x1="250" y1="38" x2="250" y2="390"/><line x1="440" y1="38" x2="440" y2="390"/><line x1="630" y1="38" x2="630" y2="390"/></g>
+  <g stroke="#3d4a63" stroke-width="1.5" font-size="10.5">
+    <line x1="80" y1="62" x2="248" y2="62" marker-end="url(#a2)"/><text x="88" y="56" stroke="none">① GET /</text>
+    <line x1="250" y1="92" x2="438" y2="92" marker-end="url(#a2)"/><text x="258" y="86" stroke="none">② handler: dashboard(ws, session)</text>
+    <line x1="440" y1="122" x2="628" y2="122" marker-end="url(#a2)"/><text x="448" y="116" stroke="none">③ field shapes of run 1, frame 1</text>
+  </g>
+  <rect x="450" y="132" width="262" height="78" rx="4" fill="#fff" stroke="#7c93bf"/>
+  <g font-size="10.2"><text x="458" y="148">Dashboard(ws, session): widgets, selections,</text>
+  <text x="458" y="163">initial Dimension (1D / 2D / 3D from shapes), top bar</text>
+  <text x="458" y="178">connect!(d): all listeners</text>
+  <text x="458" y="193">start_player!(d) · schedule!(renderer)</text>
+  <text x="458" y="206" fill="#5b6475">→ first render starts (async)</text></g>
+  <g stroke="#3d4a63" stroke-width="1.5" font-size="10.5">
+    <line x1="438" y1="232" x2="252" y2="232" marker-end="url(#a2)"/><text x="262" y="226" stroke="none">④ layout(d): DOM, plot = "Loading…"</text>
+    <line x1="248" y1="260" x2="82" y2="260" marker-end="url(#a2)"/><text x="92" y="254" stroke="none">⑤ HTML + JS</text>
+    <line x1="80" y1="288" x2="248" y2="288" marker-end="url(#a2)"/><text x="88" y="282" stroke="none">⑥ open WebSocket</text>
+    <line x1="440" y1="318" x2="628" y2="318" marker-end="url(#a2)"/><text x="448" y="312" stroke="none">⑦ render!: load + plot_frame</text>
+    <line x1="628" y1="342" x2="442" y2="342" marker-end="url(#a2)"/><text x="470" y="356" stroke="none">Figure</text>
+    <line x1="438" y1="374" x2="82" y2="374" marker-end="url(#a2)"/><text x="160" y="368" stroke="none">⑧ d.plot[] = fig → WGLMakie canvas appears</text>
+  </g>
+</svg>
+<figcaption>Figure 2 — Start-up of one session. ⑦ runs in a background task, so it can overlap ⑤–⑥; Bonito
+queues updates until the WebSocket is open.</figcaption>
+</figure>
+
+<ul>
+<li><span class="k">Once per process</span>: <code>DataWorkspace(csv, ext)</code> reads <code>DF.csv</code>, finds the
+varying parameters, their value lists and ranges, the run folders, the number of frames and the field keys.
+It is shared by every session.</li>
+<li><span class="k">Once per browser tab</span>: Bonito calls the App handler, which builds a fresh
+<code>Dashboard</code> — two tabs never share widgets or figures.</li>
+<li><span class="k">Precompilation</span> (<code>precompile.jl</code>) runs steps ②–⑦ on a tiny generated ensemble
+when the package is installed, so the first real page takes ≈3 s instead of ≈10 s. It skips
+<code>connect!</code> and the player: their background tasks would block precompilation.</li>
+</ul>
+
+<!-- ───────────────────────────── 3. State ───────────────────────────── -->
+<h2>3. The state: <code>Dashboard</code></h2>
+<p>Everything one session knows is one immutable struct of mutable things (observables, widgets,
+references). It is built by <code>Dashboard(ws, session)</code> and wired by <code>connect!</code>.</p>
+
+<figure>
+<svg viewBox="0 0 720 330" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" fill="#3d4a63"/></marker></defs>
+  <rect x="10" y="10" width="200" height="300" rx="6" fill="#fbf4e4" stroke="#c9a64b"/>
+  <text x="22" y="30" font-weight="600" font-size="12">Widgets (browser-visible)</text>
+  <g font-size="10.5"><text x="22" y="52">stable: dim, fig_base, nfile,</text><text x="22" y="67">params, pins, player (▶, fps),</text><text x="22" y="82">reset, save, png buttons,</text><text x="22" y="97">overlays (alpha, step, size,</text><text x="22" y="112">nematic, color switch)</text>
+  <text x="22" y="140">rebuilt with the top bar:</text><text x="22" y="155">menus (field + colormap</text><text x="22" y="170">dropdowns), zslider,</text><text x="22" y="185">menus1d (fields, view, cut)</text>
+  <text x="22" y="215" fill="#5b6475">a browser change notifies</text><text x="22" y="230" fill="#5b6475">widget.value in Julia;</text><text x="22" y="245" fill="#5b6475">Julia → browser writes go</text><text x="22" y="260" fill="#5b6475">through set_value! (index)</text></g>
+  <rect x="260" y="10" width="200" height="300" rx="6" fill="#eef3fb" stroke="#7c93bf"/>
+  <text x="272" y="30" font-weight="600" font-size="12">Selections (observables)</text>
+  <g font-size="10.5"><text x="272" y="52">pathdir · row · shapes</text><text x="272" y="67">current_keys · nz</text><text x="272" y="82">heatmap · colormap</text><text x="272" y="97">overlays[i].field · use_png</text><text x="272" y="112">z · fields1d · view1d</text><text x="272" y="127">cut_axis · cut_pos · cut_mean</text>
+  <text x="272" y="157" fill="#5b6475">survive top-bar rebuilds:</text><text x="272" y="172" fill="#5b6475">new dropdowns are created,</text><text x="272" y="187" fill="#5b6475">the selection stays here and</text><text x="272" y="202" fill="#5b6475">is adjusted silently</text><text x="272" y="217" fill="#5b6475">(setfield!, no notify) if</text><text x="272" y="232" fill="#5b6475">the new run lacks it</text></g>
+  <rect x="510" y="10" width="200" height="140" rx="6" fill="#eef7ee" stroke="#3d4a63"/>
+  <text x="522" y="30" font-weight="600" font-size="12">PlotConfig (snapshot)</text>
+  <g font-size="10.5"><text x="522" y="52">Ndim, nfile, cmap, heatmap,</text><text x="522" y="67">overlays::[OverlayConfig],</text><text x="522" y="82">fig_base, zslice, fields1d,</text><text x="522" y="97">cut_axis/pos/mean, view1d</text><text x="522" y="122" fill="#5b6475">immutable · with(cfg; nfile=i)</text><text x="522" y="137" fill="#5b6475">makes variants (export)</text></g>
+  <rect x="510" y="165" width="200" height="145" rx="6" fill="#fff" stroke="#3d4a63"/>
+  <text x="522" y="185" font-weight="600" font-size="12">Outputs and handles</text>
+  <g font-size="10.5"><text x="522" y="207">plot · top · status (DOM obs.)</text><text x="522" y="222">live: LiveFigure | LiveRun |</text><text x="522" y="237">        LiveImage | nothing</text><text x="522" y="252">last_rebuild (time)</text><text x="522" y="267">renderer, snapper (Debouncer)</text><text x="522" y="282">player (task + playing flag)</text></g>
+  <line x1="210" y1="80" x2="258" y2="80" stroke="#3d4a63" stroke-width="1.5" marker-end="url(#a3)"/>
+  <text x="214" y="73" font-size="9.5" fill="#5b6475">listeners</text>
+  <line x1="460" y1="80" x2="508" y2="80" stroke="#3d4a63" stroke-width="1.5" marker-end="url(#a3)"/>
+  <text x="463" y="73" font-size="9.5" fill="#5b6475">plot_config</text>
+  <line x1="610" y1="150" x2="610" y2="163" stroke="#3d4a63" stroke-width="1.5" marker-end="url(#a3)"/>
+</svg>
+<figcaption>Figure 3 — What the Dashboard holds, and the one-way path widgets → selections → PlotConfig → render.</figcaption>
+</figure>
+
+<table>
+<tr><th>Group</th><th>Fields</th><th>Lifetime</th></tr>
+<tr><td>Data source</td><td><code>ws</code> (shared DataWorkspace), <code>session</code></td><td>session</td></tr>
+<tr><td>Current run</td><td><code>pathdir</code>, <code>row</code> (DataFrame row), <code>shapes</code>, <code>current_keys</code>, <code>nz</code></td><td>changes with the sidebar (snap)</td></tr>
+<tr><td>What to plot</td><td><code>heatmap</code>, <code>colormap</code>, <code>overlays</code>, <code>use_png</code>, <code>z</code>, <code>fields1d</code>, <code>cut_*</code>, <code>view1d</code></td><td>survive top-bar rebuilds</td></tr>
+<tr><td>Stable widgets</td><td><code>dim</code>, <code>fig_base</code>, <code>nfile</code>, <code>params</code>, <code>pins</code>, <code>player</code>, buttons</td><td>session</td></tr>
+<tr><td>Rebuilt widgets</td><td><code>menus[]</code>, <code>zslider[]</code>, <code>menus1d[]</code> (Refs to the current ones)</td><td>until the next top-bar rebuild</td></tr>
+<tr><td>Outputs</td><td><code>plot</code> (Figure, &lt;img&gt; or message), <code>top</code>, <code>status</code>, <code>cursor</code> (value under the mouse)</td><td>session (contents replaced)</td></tr>
+<tr><td>In-place handle</td><td><code>live[]</code>: what is on screen and can be updated without a rebuild</td><td>until the next rebuild / <code>show!</code></td></tr>
+<tr><td>Loops</td><td><code>renderer</code>, <code>snapper</code> (Debouncers), player task, <code>last_rebuild</code></td><td>session (player stops when it closes)</td></tr>
+<tr><td>Exports</td><td><code>exporting</code>: one of Save all .png / Movie / PDF runs at a time</td><td>during an export</td></tr>
+</table>
+
+<div class="note"><span class="k">Index vs value.</span> Bonito's Slider and Dropdown display their
+<em>index</em>; <code>.value</code> is a Julia-side copy. A browser move updates both. A Julia write must go through
+<code>set_value!(widget, v)</code>, which sets the index — writing <code>.value</code> alone moves the label but not the
+thumb. Snapping and the player use <code>set_value!</code>.</div>
+
+<!-- ───────────────────────────── 4. Events ───────────────────────────── -->
+<h2>4. Events: from a click or a drag to a render</h2>
+<figure>
+<svg viewBox="0 0 720 300" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" fill="#3d4a63"/></marker></defs>
+  <g font-size="10.5">
+  <rect x="10" y="20" width="120" height="62" rx="5" fill="#fbf4e4" stroke="#c9a64b"/><text x="20" y="40" font-weight="600">User</text><text x="20" y="56">drags a slider,</text><text x="20" y="71">clicks, picks…</text>
+  <rect x="155" y="20" width="125" height="62" rx="5" fill="#fbf4e4" stroke="#c9a64b"/><text x="165" y="40" font-weight="600">Browser widget</text><text x="165" y="56">index changes,</text><text x="165" y="71">sent over WebSocket</text>
+  <rect x="305" y="20" width="125" height="62" rx="5" fill="#eef3fb" stroke="#7c93bf"/><text x="315" y="40" font-weight="600">Julia observable</text><text x="315" y="56">widget.value[]</text><text x="315" y="71">notifies listeners</text>
+  <rect x="455" y="20" width="120" height="62" rx="5" fill="#eef3fb" stroke="#7c93bf"/><text x="465" y="40" font-weight="600">on_change</text><text x="465" y="56">drops repeats</text><text x="465" y="71">(browser echoes)</text>
+  <rect x="600" y="20" width="110" height="62" rx="5" fill="#eef3fb" stroke="#7c93bf"/><text x="610" y="40" font-weight="600">schedule!</text><text x="610" y="56">renderer or</text><text x="610" y="71">snapper</text>
+  <rect x="600" y="140" width="110" height="70" rx="5" fill="#fff" stroke="#3d4a63"/><text x="610" y="160" font-weight="600">Debouncer loop</text><text x="610" y="176">@async, one at a</text><text x="610" y="191">time, collapses</text><text x="610" y="205">bursts (§5)</text>
+  <rect x="420" y="140" width="150" height="70" rx="5" fill="#fff" stroke="#3d4a63"/><text x="430" y="160" font-weight="600">render!(d) / snap!(d)</text><text x="430" y="176">reads selections,</text><text x="430" y="191">builds PlotConfig,</text><text x="430" y="205">decides (§6)</text>
+  <rect x="200" y="140" width="190" height="70" rx="5" fill="#fff" stroke="#3d4a63"/><text x="210" y="160" font-weight="600">Julia-side result</text><text x="210" y="176">live.data[] = frame (in place)</text><text x="210" y="191">d.plot[] = new figure (rebuild)</text><text x="210" y="205">set_value!(widget, v) (snap)</text>
+  <rect x="10" y="140" width="160" height="70" rx="5" fill="#fbf4e4" stroke="#c9a64b"/><text x="20" y="160" font-weight="600">Browser</text><text x="20" y="176">canvas buffers updated,</text><text x="20" y="191">or canvas replaced,</text><text x="20" y="205">or thumbs move</text>
+  </g>
+  <g stroke="#3d4a63" stroke-width="1.5">
+  <line x1="130" y1="51" x2="153" y2="51" marker-end="url(#a4)"/><line x1="280" y1="51" x2="303" y2="51" marker-end="url(#a4)"/>
+  <line x1="430" y1="51" x2="453" y2="51" marker-end="url(#a4)"/><line x1="575" y1="51" x2="598" y2="51" marker-end="url(#a4)"/>
+  <line x1="655" y1="82" x2="655" y2="138" marker-end="url(#a4)"/><line x1="600" y1="175" x2="572" y2="175" marker-end="url(#a4)"/>
+  <line x1="420" y1="175" x2="392" y2="175" marker-end="url(#a4)"/><line x1="200" y1="175" x2="172" y2="175" marker-end="url(#a4)"/>
+  </g>
+  <path d="M90,140 L90,111 L367,111 L367,85" fill="none" stroke="#b0306a" stroke-width="1.3" stroke-dasharray="4 3" marker-end="url(#a4)"/>
+  <text x="100" y="105" font-size="9.5" fill="#b0306a">a Julia write (set_value!, player) echoes back — on_change drops it</text>
+</svg>
+<figcaption>Figure 4 — The path of every user action. Buttons are simpler: a plain listener runs the operation
+in a background task (<code>@async(toggle_play!(d))</code> …).</figcaption>
+</figure>
+
+<table>
+<tr><th>Action</th><th>Listener → work</th><th>Figure</th></tr>
+<tr><td>Time slider, ▶ playing</td><td><code>nfile</code> → renderer</td><td>updated in place</td></tr>
+<tr><td>Slice z (3D), cut position (1D)</td><td><code>z</code>, <code>cut_pos</code> → renderer</td><td>in place</td></tr>
+<tr><td>Arrow size</td><td><code>overlays[i].arrowsize</code> → renderer</td><td>in place (<code>style</code>)</td></tr>
+<tr><td>Run range (tick)</td><td><code>fixed_range</code> → renderer → <code>request_range!</code> (background) → when ready, renderer again</td><td>rebuilt once when the range arrives; new run/field ranges in place</td></tr>
+<tr><td>Field, colormap, overlay field / step / min brightness / nematic / color, Fig size, 1D fields / view / cut axis / mean</td><td>→ renderer</td><td>rebuilt, after the controls settle</td></tr>
+<tr><td>Dimension</td><td>top bar rebuilt, then → renderer</td><td>rebuilt</td></tr>
+<tr><td>Sidebar parameter or pin</td><td>→ snapper → maybe new <code>pathdir</code> → reload_keys! → renderer</td><td>in place if the new run has the same fields and sizes</td></tr>
+<tr><td>Click ▶ / ❚❚</td><td><code>toggle_play!</code>: flips <code>playing</code>, button label</td><td>—</td></tr>
+<tr><td>Click ↺ Reset</td><td><code>reset_view!</code>: reset both Debouncers, <code>show!("Reloading…")</code>, render</td><td>rebuilt</td></tr>
+<tr><td>Click 💾 Save all .png</td><td><code>save_all!</code>: <code>save_frames</code> with CairoMakie, progress in <code>status</code></td><td>—</td></tr>
+<tr><td>Click 🖼 Use PNG</td><td><code>toggle_png!</code> → renderer</td><td>&lt;img&gt; or figure</td></tr>
+<tr><td>Click 🎞 Movie / 📄 PDF</td><td><code>save_movie!</code> (CairoMakie <code>record</code>, the figure updated in place frame by frame) / <code>save_pdf!</code>; errors go to <code>status</code></td><td>— (files in <code>Fig/</code>)</td></tr>
+<tr><td>Mouse move over the plot</td><td>listener set by <code>track_cursor!</code> on the figure: axis under the mouse → data coordinates → <code>cursor_text*</code> on the full-resolution frame (also on each new frame)</td><td>— (<code>cursor</code> line)</td></tr>
+</table>
+
+<!-- ───────────────────────────── 5. Debouncer ───────────────────────────── -->
+<h2>5. The Debouncer — why nothing ever queues up</h2>
+<figure>
+<svg viewBox="0 0 720 250" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="a5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" fill="#3d4a63"/></marker></defs>
+  <rect x="20" y="95" width="150" height="56" rx="26" fill="#f4f4f4" stroke="#3d4a63"/>
+  <text x="95" y="118" text-anchor="middle" font-weight="600" font-size="12">Idle</text>
+  <text x="95" y="136" text-anchor="middle" font-size="10">active = false</text>
+  <rect x="330" y="15" width="210" height="56" rx="26" fill="#eef3fb" stroke="#3d4a63"/>
+  <text x="435" y="38" text-anchor="middle" font-weight="600" font-size="12">Running f()</text>
+  <text x="435" y="56" text-anchor="middle" font-size="10">active = true, pending = false</text>
+  <rect x="330" y="170" width="210" height="56" rx="26" fill="#eef3fb" stroke="#3d4a63"/>
+  <text x="435" y="193" text-anchor="middle" font-weight="600" font-size="12">Running + 1 pending</text>
+  <text x="435" y="211" text-anchor="middle" font-size="10">active = true, pending = true</text>
+  <g stroke="#3d4a63" stroke-width="1.5" fill="none">
+    <line x1="160" y1="100" x2="330" y2="36" marker-end="url(#a5)"/>
+    <line x1="340" y1="64" x2="172" y2="128" marker-end="url(#a5)"/>
+    <line x1="470" y1="71" x2="470" y2="168" marker-end="url(#a5)"/>
+    <line x1="410" y1="170" x2="410" y2="73" marker-end="url(#a5)"/>
+    <path d="M540,186 C610,170 610,226 540,210" marker-end="url(#a5)"/>
+  </g>
+  <g font-size="10">
+    <text class="halo" x="150" y="60">schedule!: start the @async loop</text>
+    <text class="halo" x="180" y="148">f() done, nothing pending</text>
+    <text class="halo" x="478" y="124">schedule!</text>
+    <text class="halo" x="402" y="124" text-anchor="end">f() done → run f() again</text>
+    <text x="612" y="194">schedule! again:</text><text x="612" y="208">absorbed (no queue)</text>
+  </g>
+  <text x="20" y="244" font-size="10" fill="#5b6475">reset! (Reset button) clears both flags; a stuck loop is abandoned and a fresh one starts on the next schedule!.</text>
+</svg>
+<figcaption>Figure 5 — Debouncer states. However many triggers arrive while <code>f</code> runs, exactly one more
+run follows, with the latest values. Two Debouncers exist: <code>renderer</code> (f = render!) and
+<code>snapper</code> (f = snap!).</figcaption>
+</figure>
+<p>Because <code>f</code> always reads the <em>current</em> selections, a burst of 50 slider events while one render
+runs gives one more render with the last value — never 50 queued renders, and the final position is never lost.
+<code>busy(renderer)</code> (active or pending) is also what the player waits on.</p>
+
+<!-- ───────────────────────────── 6. render! ───────────────────────────── -->
+<h2>6. <code>render!</code> — the decision tree</h2>
+<figure>
+<svg viewBox="0 0 720 560" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="a6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" fill="#3d4a63"/></marker></defs>
+  <g font-size="10.5">
+  <rect x="235" y="8" width="250" height="38" rx="5" fill="#eef3fb" stroke="#3d4a63"/><text x="360" y="24" text-anchor="middle" font-weight="600">render!(d)</text><text x="360" y="39" text-anchor="middle">cfg = plot_config(d)  (try … catch → "Error: …")</text>
+  <polygon points="360,62 440,90 360,118 280,90" fill="#fff" stroke="#3d4a63"/><text x="360" y="94" text-anchor="middle">Use PNG?</text>
+  <rect x="490" y="66" width="220" height="62" rx="5" fill="#fbf4e4" stroke="#c9a64b"/><text x="500" y="84" font-weight="600">render_png!</text><text x="500" y="99">png_file → data URI (base64)</text><text x="500" y="114">LiveImage? swap src : new &lt;img&gt;</text>
+  <polygon points="360,138 465,170 360,202 255,170" fill="#fff" stroke="#3d4a63"/><text x="360" y="167" text-anchor="middle">1D Kymograph or</text><text x="360" y="181" text-anchor="middle">Times overlaid?</text>
+  <rect x="490" y="140" width="220" height="92" rx="5" fill="#fff" stroke="#3d4a63"/><text x="500" y="158" font-weight="600">render_run!</text><text x="500" y="173">key = run, view, fields, cut, size, cmap</text><text x="500" y="188">same key → frame[] = nfile</text><text x="500" y="203">(only the marker moves)</text><text x="500" y="218">else settle → run_profiles → plot_run</text>
+  <rect x="200" y="222" width="320" height="52" rx="5" fill="#eef7ee" stroke="#3d4a63"/><text x="210" y="240">data = load_frame(pathdir, cfg) — only the needed fields</text><text x="210" y="256">data = reduce_frame(data, cfg) — 3D: z-slice · 1D: profiles</text><text x="210" y="270" fill="#5b6475">(a message instead of data → show!(message))</text>
+  <polygon points="360,292 470,326 360,360 250,326" fill="#fff" stroke="#3d4a63"/><text x="360" y="323" text-anchor="middle">layout_key(cfg, data)</text><text x="360" y="337" text-anchor="middle">== live.key ?</text>
+  <rect x="30" y="384" width="270" height="70" rx="5" fill="#eef7ee" stroke="#3d4a63"/><text x="40" y="402" font-weight="600">In place (yes)</text><text x="40" y="418">style[] = cfg if arrow sizes changed</text><text x="40" y="433">data[] = frame → Makie lifts → only the</text><text x="40" y="448">changed arrays travel to the browser</text>
+  <rect x="420" y="384" width="290" height="62" rx="5" fill="#fdf0f0" stroke="#b0306a"/><text x="430" y="402" font-weight="600">settle_before_rebuild (no)</text><text x="430" y="418">sleep 0.2 s, and ≥ 0.6 s since the last rebuild</text><text x="430" y="433">renderer.pending? → skip (a newer run follows)</text>
+  <rect x="420" y="468" width="290" height="70" rx="5" fill="#fff" stroke="#3d4a63"/><text x="430" y="486" font-weight="600">Rebuild</text><text x="430" y="502">plot_frame(data Observable, cfg; style)</text><text x="430" y="517">show!(fig): d.plot[] = fig, live cleared</text><text x="430" y="532">live = LiveFigure(key, data, style)</text>
+  </g>
+  <g stroke="#3d4a63" stroke-width="1.5" font-size="10">
+    <line x1="360" y1="46" x2="360" y2="60" marker-end="url(#a6)"/>
+    <line x1="440" y1="90" x2="488" y2="90" marker-end="url(#a6)"/><text x="452" y="84" stroke="none">yes</text>
+    <line x1="360" y1="118" x2="360" y2="136" marker-end="url(#a6)"/><text x="366" y="131" stroke="none">no</text>
+    <line x1="465" y1="170" x2="488" y2="170" marker-end="url(#a6)"/><text x="468" y="164" stroke="none">yes</text>
+    <line x1="360" y1="202" x2="360" y2="220" marker-end="url(#a6)"/><text x="366" y="215" stroke="none">no</text>
+    <line x1="360" y1="274" x2="360" y2="290" marker-end="url(#a6)"/>
+    <path d="M250,326 L165,326 L165,382" fill="none" marker-end="url(#a6)"/><text x="190" y="320" stroke="none">yes</text>
+    <path d="M470,326 L565,326 L565,382" fill="none" marker-end="url(#a6)"/><text x="520" y="320" stroke="none">no</text>
+    <line x1="565" y1="446" x2="565" y2="466" marker-end="url(#a6)"/>
+  </g>
+</svg>
+<figcaption>Figure 6 — Every render goes through this tree. <code>layout_key</code> = everything that shapes the
+figure: dimension, colormap, heatmap field, overlays (field, min brightness, step, nematic, colour — not
+size), Fig size, and the sizes of the arrays (1D: fields, cut axis/mean, Fig size, sizes).</figcaption>
+</figure>
+
+<!-- ───────────────────────────── 7. Buffers ───────────────────────────── -->
+<h2>7. Buffers: where the data lives and for how long</h2>
+<figure>
+<svg viewBox="0 0 720 360" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="a7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" fill="#3d4a63"/></marker></defs>
+  <g font-size="10.5">
+  <rect x="10" y="20" width="115" height="62" rx="5" fill="#f4f4f4" stroke="#888"/><text x="20" y="40" font-weight="600">Disk</text><text x="20" y="56">0000000070.jld</text><text x="20" y="71" fill="#5b6475">one file per frame</text>
+  <rect x="150" y="20" width="135" height="62" rx="5" fill="#eef7ee" stroke="#3d4a63"/><text x="160" y="40" font-weight="600">load_fields</text><text x="160" y="56">only keys needed</text><text x="160" y="71" fill="#5b6475">raw Dict, Float64/32</text>
+  <rect x="310" y="20" width="135" height="62" rx="5" fill="#eef7ee" stroke="#3d4a63"/><text x="320" y="40" font-weight="600">reduce_frame</text><text x="320" y="56">3D: slice z</text><text x="320" y="71">1D: profile / cut</text>
+  <rect x="470" y="12" width="240" height="78" rx="6" fill="#fff" stroke="#b0306a" stroke-width="2"/><text x="480" y="32" font-weight="600" fill="#b0306a">live.data :: Observable{Dict}</text><text x="480" y="48">THE per-frame buffer: replaced</text><text x="480" y="63">by each new frame / slice / cut;</text><text x="480" y="78">everything below derives from it</text>
+  <rect x="20" y="150" width="160" height="78" rx="5" fill="#fff" stroke="#3d4a63"/><text x="30" y="168" font-weight="600">heatmap lift</text><text x="30" y="184">heatmap_field (norm)</text><text x="30" y="199">→ downsample: block mean</text><text x="30" y="214">to ≤ Fig size cells/axis</text>
+  <rect x="195" y="150" width="160" height="78" rx="5" fill="#fff" stroke="#3d4a63"/><text x="205" y="168" font-weight="600">mask lift</text><text x="205" y="184">mask_colors(alpha)</text><text x="205" y="199">downsampled too</text><text x="205" y="214">RGBA image</text>
+  <rect x="370" y="150" width="170" height="78" rx="5" fill="#fff" stroke="#3d4a63"/><text x="380" y="168" font-weight="600">arrow lifts</text><text x="380" y="184">arrow_dirs ÷ max_norm</text><text x="380" y="199">(0 if max &lt; 1e-6), every</text><text x="380" y="214">step-th point; size ← style</text>
+  <rect x="555" y="150" width="155" height="78" rx="5" fill="#fff" stroke="#3d4a63"/><text x="565" y="168" font-weight="600">title lift</text><text x="565" y="184">arrows_title:</text><text x="565" y="199">"max |P| = 0.855"</text>
+  <rect x="120" y="270" width="480" height="70" rx="6" fill="#fbf4e4" stroke="#c9a64b"/><text x="130" y="290" font-weight="600">WGLMakie → WebSocket → browser</text><text x="130" y="306">changed plot inputs are serialized and sent; the canvas updates its GPU textures</text><text x="130" y="321">and vertex buffers — no new canvas, no new WebGL context</text>
+  </g>
+  <g stroke="#3d4a63" stroke-width="1.5">
+    <line x1="125" y1="51" x2="148" y2="51" marker-end="url(#a7)"/><line x1="285" y1="51" x2="308" y2="51" marker-end="url(#a7)"/><line x1="445" y1="51" x2="468" y2="51" marker-end="url(#a7)"/>
+    <path d="M590,90 L590,120 L100,120 L100,148" fill="none" marker-end="url(#a7)"/>
+    <line x1="275" y1="120" x2="275" y2="148" marker-end="url(#a7)"/><line x1="455" y1="120" x2="455" y2="148" marker-end="url(#a7)"/><line x1="632" y1="120" x2="632" y2="148" marker-end="url(#a7)"/>
+    <line x1="100" y1="228" x2="200" y2="268" marker-end="url(#a7)"/><line x1="275" y1="228" x2="300" y2="268" marker-end="url(#a7)"/><line x1="455" y1="228" x2="430" y2="268" marker-end="url(#a7)"/><line x1="632" y1="228" x2="540" y2="268" marker-end="url(#a7)"/>
+  </g>
+</svg>
+<figcaption>Figure 7 — The per-frame pipeline in data mode. Only the red-bordered buffer is replaced per frame;
+the lifts recompute and Makie ships only what changed. Exports (<code>save_frames</code>) use the same
+<code>plot_frame</code> at full resolution with CairoMakie.</figcaption>
+</figure>
+
+<table>
+<tr><th>Buffer / cache</th><th>Holds</th><th>Replaced when</th><th>Size, managed by</th></tr>
+<tr><td><code>DataWorkspace</code></td><td>DF.csv, parameter tables and ranges, run folders, frame count, keys, colormap list</td><td>never (per process)</td><td>small · built once</td></tr>
+<tr><td><code>ws.run_ranges</code> (RangeCache)</td><td>colour range (min, max) per (run, field, dimension, frame count), and the computations in flight</td><td>never; a new frame count is a new key</td><td>a few numbers · filled in the background by <code>request_range!</code> → <code>run_range</code> (one field per file, another thread), shared by all tabs</td></tr>
+<tr><td><code>d.shapes</code>, <code>current_keys</code>, <code>nz</code></td><td>field sizes of the current run's first frame</td><td>run changes (<code>reload_keys!</code>)</td><td>tiny</td></tr>
+<tr><td><code>LiveFigure.data</code></td><td>current frame, reduced (slice / profiles), needed fields only</td><td>every frame, slice, cut</td><td>one frame · old Dict dropped (GC)</td></tr>
+<tr><td><code>LiveFigure.style</code></td><td>the PlotConfig whose arrow sizes and run colour range are shown</td><td>arrow size or colour range changes</td><td>tiny</td></tr>
+<tr><td>Makie plot inputs</td><td>downsampled heatmap, mask, arrow directions, title</td><td>derived from <code>data</code> / <code>style</code></td><td>≤ Fig size² cells · Makie</td></tr>
+<tr><td><code>LiveRun</code> figure</td><td>whole run: field ⇒ (points × frames) matrix + times</td><td>run, view, fields, cut, Fig size or colormap changes</td><td>all frames of one run · loaded once</td></tr>
+<tr><td><code>LiveImage.src</code></td><td>current PNG as a base64 data URI</td><td>every frame in PNG mode</td><td>one image</td></tr>
+<tr><td>Browser canvas</td><td>one WebGL context per figure (GPU textures, vertex buffers)</td><td>rebuild only (old canvas removed)</td><td>browser · rebuilds settled (§8)</td></tr>
+<tr><td>Debouncer flags, <code>last_rebuild</code>, player clock</td><td>scheduling state</td><td>continuously</td><td>a few numbers</td></tr>
+</table>
+<div class="note">Nothing is cached <em>across</em> frames in data mode: each frame is read from disk (only the fields
+in use), reduced, and dropped when the next one arrives. Memory therefore stays at about one frame,
+whatever the run length — except in the 1D whole-run views, which hold the run's profiles by design.</div>
+
+<!-- ───────────────────────────── 8. Time lines ───────────────────────────── -->
+<h2>8. Clicks and drags on a time line</h2>
+<figure>
+<svg viewBox="0 0 720 400" xmlns="http://www.w3.org/2000/svg">
+  <g font-size="10.5">
+  <text x="10" y="18" font-weight="600">A · Drag of an in-place slider (time, slice z, cut, arrow size)</text>
+  <line x1="20" y1="60" x2="700" y2="60" stroke="#9aa3b5"/>
+  <g fill="#c9a64b">
+    <circle cx="40" cy="45" r="3"/><circle cx="60" cy="45" r="3"/><circle cx="80" cy="45" r="3"/><circle cx="100" cy="45" r="3"/><circle cx="120" cy="45" r="3"/><circle cx="140" cy="45" r="3"/><circle cx="160" cy="45" r="3"/><circle cx="180" cy="45" r="3"/><circle cx="200" cy="45" r="3"/><circle cx="220" cy="45" r="3"/><circle cx="240" cy="45" r="3"/><circle cx="260" cy="45" r="3"/></g>
+  <rect x="40" y="66" width="55" height="12" fill="#7c93bf"/><rect x="97" y="66" width="55" height="12" fill="#7c93bf"/><rect x="154" y="66" width="55" height="12" fill="#7c93bf"/><rect x="211" y="66" width="55" height="12" fill="#7c93bf"/>
+  <text x="290" y="49" fill="#5b6475">● input events (every few ms)</text>
+  <text x="290" y="77" fill="#5b6475">■ in-place renders, one at a time, each with the latest value</text>
+
+  <text x="10" y="122" font-weight="600">B · Drag of a layout slider (step, Fig size, min brightness…) or a fast series of picks</text>
+  <line x1="20" y1="165" x2="340" y2="165" stroke="#9aa3b5"/>
+  <g fill="#c9a64b"><circle cx="40" cy="150" r="3"/><circle cx="60" cy="150" r="3"/><circle cx="80" cy="150" r="3"/><circle cx="100" cy="150" r="3"/><circle cx="120" cy="150" r="3"/><circle cx="140" cy="150" r="3"/><circle cx="160" cy="150" r="3"/><circle cx="180" cy="150" r="3"/></g>
+  <rect x="40" y="171" width="38" height="12" fill="#f3c6d6"/><rect x="80" y="171" width="38" height="12" fill="#f3c6d6"/><rect x="120" y="171" width="38" height="12" fill="#f3c6d6"/><rect x="160" y="171" width="38" height="12" fill="#f3c6d6"/>
+  <rect x="200" y="171" width="64" height="12" fill="#f3c6d6"/><rect x="266" y="171" width="70" height="12" fill="#b0306a"/>
+  <line x1="180" y1="190" x2="264" y2="190" stroke="#b0306a"/><text x="186" y="203" fill="#b0306a">0.2 s still</text>
+  <text x="350" y="153" fill="#5b6475">pink: each render waits to settle; a newer change is</text>
+  <text x="350" y="168" fill="#5b6475">pending → skipped. Dark: one rebuild with the final value,</text>
+  <text x="350" y="183" fill="#5b6475">≥ 0.6 s after the previous one → one new WebGL canvas</text>
+
+  <text x="10" y="232" font-weight="600">C · ▶ Play at fps = 4 (period 250 ms)</text>
+  <line x1="20" y1="275" x2="700" y2="275" stroke="#9aa3b5"/>
+  <g stroke="#3d4a63"><line x1="40" y1="250" x2="40" y2="275"/><line x1="140" y1="250" x2="140" y2="275"/><line x1="240" y1="250" x2="240" y2="275"/><line x1="380" y1="250" x2="380" y2="275"/><line x1="480" y1="250" x2="480" y2="275"/></g>
+  <rect x="42" y="280" width="30" height="12" fill="#7c93bf"/><rect x="142" y="280" width="30" height="12" fill="#7c93bf"/><rect x="242" y="280" width="138" height="12" fill="#7c93bf"/><rect x="382" y="280" width="30" height="12" fill="#7c93bf"/><rect x="482" y="280" width="30" height="12" fill="#7c93bf"/>
+  <text x="250" y="305" fill="#5b6475">a slow frame: the next one waits for it (no skip)</text>
+  <text x="520" y="262" fill="#5b6475">| frame advance (set_value! nfile)</text>
+  <text x="520" y="290" fill="#5b6475">■ in-place render</text>
+
+  <text x="10" y="340" font-weight="600">D · Click on a sidebar parameter</text>
+  <rect x="20" y="352" width="70" height="20" rx="3" fill="#eef3fb" stroke="#7c93bf"/><text x="27" y="366">snap!</text>
+  <rect x="100" y="352" width="140" height="20" rx="3" fill="#eef3fb" stroke="#7c93bf"/><text x="107" y="366">pathdir changes</text>
+  <rect x="250" y="352" width="180" height="20" rx="3" fill="#eef3fb" stroke="#7c93bf"/><text x="257" y="366">reload_keys! (+ new menus)</text>
+  <rect x="440" y="352" width="110" height="20" rx="3" fill="#7c93bf"/><text x="447" y="366" fill="#fff">one render</text>
+  <rect x="560" y="352" width="150" height="20" rx="3" fill="#eef3fb" stroke="#7c93bf"/><text x="567" y="366">snap again: no-op</text>
+  <text x="20" y="392" fill="#5b6475">the run changes first, the field list follows, then exactly one render (two quick rebuilds used to leave a stuck spinner)</text>
+  </g>
+</svg>
+<figcaption>Figure 8 — Four typical interactions. In-place work starts immediately; anything that replaces the
+WebGL canvas waits until the user is done (REBUILD_SETTLE = 0.2 s, MIN_REBUILD_GAP = 0.6 s).</figcaption>
+</figure>
+<div class="note"><span class="k">Why the rebuild delay exists.</span> A rebuild replaces the canvas. Replacing it
+again before the browser has finished setting the previous one up makes WGLMakie throw
+(<code>setup_scene_init</code> on a removed canvas) and breaks the page until a refresh — this is what a fast
+drag of the arrow size did before it became an in-place update.</div>
+
+<!-- ───────────────────────────── 9. Snapping ───────────────────────────── -->
+<h2>9. Navigating parameter space: snapping</h2>
+<figure>
+<svg viewBox="0 0 720 210" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="a9" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" fill="#b0306a"/></marker></defs>
+  <g font-size="10.5">
+  <line x1="60" y1="170" x2="330" y2="170" stroke="#3d4a63"/><line x1="60" y1="170" x2="60" y2="20" stroke="#3d4a63"/>
+  <text x="170" y="195">alpha_p</text><text x="68" y="186">0</text><text x="290" y="186">0.1</text>
+  <text x="8" y="140">none</text><text x="8" y="55">polar</text><text x="8" y="100" fill="#5b6475">orientation</text>
+  <circle cx="80" cy="136" r="8" fill="#7c93bf"/><text x="94" y="140">run 1 (current)</text>
+  <circle cx="295" cy="50" r="8" fill="#7c93bf"/><text x="225" y="35">run 2</text>
+  <circle cx="80" cy="50" r="8" fill="none" stroke="#b0306a" stroke-dasharray="3 2"/><text x="94" y="76" fill="#b0306a">picked (polar, 0): no such run</text>
+  <path d="M80,126 L80,62" stroke="#b0306a" stroke-width="1.5" marker-end="url(#a9)"/>
+  <path d="M92,50 L283,50" stroke="#b0306a" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#a9)"/>
+  </g>
+  <g font-size="10.5">
+  <text x="370" y="35" font-weight="600">snap!(d) → snap(ws, values, pinned)</text>
+  <text x="370" y="56">distance(row) = Σ w · |value − row| / range</text>
+  <text x="370" y="72">  (text parameters: 0 if equal, 1 otherwise)</text>
+  <text x="370" y="92">w = 1000 (W_PIN) if pinned, else 1</text>
+  <text x="370" y="112">pinned = pin checkbox OR moved away from the</text>
+  <text x="370" y="128">current run — so the value you just picked is kept</text>
+  <text x="370" y="148">and the others adapt: (polar, 0) → run 2 = (polar, 0.1)</text>
+  <text x="370" y="170">then: row, pathdir, set_value! on every sidebar widget</text>
+  <text x="370" y="186">(the echo triggers one more snap, which changes nothing)</text>
+  </g>
+</svg>
+<figcaption>Figure 9 — Snapping in a parameter space with holes, as in PQ_FFT where <code>orientation=polar</code>
+only exists together with other parameter values.</figcaption>
+</figure>
+
+<!-- ───────────────────────────── 10. Rules ───────────────────────────── -->
+<h2>10. Rules that keep it working</h2>
+<div class="rule"><span class="k">Listeners schedule, they don't work.</span> Writes to browser-synced observables from
+inside a listener go through <code>@async</code> or a Debouncer; writing while Bonito is still processing the
+current message causes "notify on null".</div>
+<div class="rule"><span class="k">Julia → browser widget writes use <code>set_value!</code></span> (index), never
+<code>.value</code> alone.</div>
+<div class="rule"><span class="k">Listeners use <code>on_change</code></span>: the browser echoes every value Julia sets;
+without the filter each animation frame would render twice.</div>
+<div class="rule"><span class="k">Rebuilding the top bar adjusts selections silently</span> (<code>setfield!(obs, :val, …)</code>,
+no notify) and is always followed by one <code>schedule!(renderer)</code>.</div>
+<div class="rule"><span class="k">A run change renders once</span>: <code>reload_keys!</code> (fields, slices, menus)
+first, then the render — never a render on the path change and another on the key change.</div>
+<div class="rule"><span class="k">Anything that can change during playback must be an observable input of the
+figure</span> (data, style, frame marker), not part of <code>layout_key</code> — otherwise each change rebuilds
+the canvas. Anything in <code>layout_key</code> goes through <code>settle_before_rebuild</code>.</div>
+<div class="rule"><span class="k">Makie attributes that follow data are passed as observables when the plot is
+created</span> (e.g. <code>Axis(…; title=obs)</code>); assigning an observable afterwards
+(<code>ax.title = obs</code>) is an error.</div>
+<div class="rule"><span class="k">Nothing that spawns tasks goes into the precompile workload</span>
+(<code>connect!</code>, the player): precompilation would wait for them forever.</div>
+
+<!-- ───────────────────────────── 11. Where / tests ───────────────────────────── -->
+<h2>11. Where to change what · how to test it</h2>
+<table>
+<tr><th>To change…</th><th>Look at</th></tr>
+<tr><td>what a frame looks like (heatmap, arrows, mask, title, 1D panels, kymograph)</td><td><code>Plotting.jl</code>: <code>plot_frame</code>, <code>draw_overlay!</code>, <code>plot_profiles</code>, <code>plot_run</code></td></tr>
+<tr><td>how a field is reduced (3D slice, 1D cut, shape rules)</td><td><code>Plotting.jl</code>: <code>depth</code>, <code>slice_field</code>, <code>profile</code>, <code>reduce_frame</code></td></tr>
+<tr><td>whether a change updates in place or rebuilds</td><td><code>State.jl</code>: <code>layout_key</code>, <code>render_fields!</code>, <code>render_run!</code>, <code>LiveFigure.style</code></td></tr>
+<tr><td>a new setting</td><td>widget in <code>Dashboard</code>/<code>OverlayControls</code> → field in <code>PlotConfig</code> → <code>plot_config(d)</code> → <code>plot_triggers</code> → use it in Plotting; decide: in place or <code>layout_key</code></td></tr>
+<tr><td>which listener reacts to what</td><td><code>App.jl</code>: <code>connect!</code></td></tr>
+<tr><td>page layout</td><td><code>App.jl</code>: <code>layout</code>; top bars in <code>State.jl</code>: <code>top_dom</code>, <code>field_menus_dom!</code>, <code>slice_dom!</code>, <code>menus_1d_dom!</code></td></tr>
+<tr><td>run navigation</td><td><code>Utils.jl</code>: <code>find_closest_row</code>, <code>snap</code>; <code>State.jl</code>: <code>snap!</code></td></tr>
+<tr><td>other data layouts / test data</td><td><code>Import.jl</code> (<code>unstack_runs</code>), <code>Demo.jl</code> (<code>demo_dataset</code>)</td></tr>
+</table>
+
+<h3>Testing</h3>
+<ul>
+<li><code>julia --project=. -e 'using Pkg; Pkg.test()'</code> — 642 tests, ≈1 min, also run by GitHub Actions CI on every push. Pure functions are tested directly;
+the app is tested headlessly with <code>DV.dashboard(ws, Bonito.Session())</code>: setting a widget's value fires
+the same listeners a browser would.</li>
+<li><code>julia dev/browser_check.jl &lt;scenario&gt; &lt;DF.csv&gt; &lt;outdir&gt; [fps]</code> — the real page in headless
+Chrome through the DevTools protocol: browser errors, frames per second, rebuilt canvases, screenshots.
+Scenarios: <code>load</code>, <code>polar</code>, <code>play</code>, <code>png-play</code>, <code>3d</code>, <code>1d</code>,
+<code>drag</code>, <code>hover</code>, <code>range</code>. It finds what the Julia tests cannot see (index/value desync, stuck spinners, WebGL errors).</li>
+<li><code>julia demo.jl 1|2|3</code> — the generated ensemble (shapes, orders, anchorings) to try a change by eye.</li>
+</ul>
+
+</body>
+</html>

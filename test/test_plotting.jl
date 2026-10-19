@@ -412,6 +412,37 @@ end
     end
 end
 
+@testset "colour range over a run" begin
+    root = make_dataset()
+    dir  = datadir(root, "run_001")
+    done = Threads.Atomic{Int}(0)
+    @test DV.run_range(dir, "rho", "2D", ".jld"; progress=done) == (3.0, 39.0)   # rho = i + j + t
+    @test done[] == 3
+    lo, hi = DV.run_range(dir, "v", "2D", ".jld")                               # |v| = hypot(1, t)
+    @test lo ≈ hypot(1, 1) && hi ≈ hypot(1, 3)
+
+    d3 = datadir(make_dataset_3d(), "run_a")                                     # whole volume
+    @test DV.run_range(d3, "s3", "3D", ".jld") == (1.0, Float64(NZ_A))
+    lo, hi = DV.run_range(d3, "v3", "3D", ".jld")
+    @test lo ≈ sqrt(3) && hi ≈ sqrt(1 + 4 + NZ_A^2)
+
+    flat = mktempdir()                                                           # constant / no data
+    for t in 1:2
+        write_frame(joinpath(flat, frame_name(t)), Dict{String,Any}("c" => fill(2.0, 4, 3), "n" => fill(NaN, 4, 3)))
+    end
+    @test DV.run_range(flat, "c", "2D", ".jld") == (1.5, 2.5)
+    @test isnothing(DV.run_range(flat, "n", "2D", ".jld"))
+
+    # in the figure, and updated in place through `style`
+    data  = frame_fields(1, 1)
+    cfg   = test_config(; colorrange=(0.0, 10.0))
+    style = Observable(cfg)
+    hm    = axis_of(DV.plot_frame(data, cfg; style)).scene.plots[1]
+    @test collect(hm.colorrange[]) ≈ [0, 10]          # Makie stores Float32[lo, hi]
+    style[] = DV.with(cfg; colorrange=(1.0, 2.0))
+    @test collect(hm.colorrange[]) ≈ [1, 2]
+end
+
 @testset "downsample" begin
     A = reshape(Float64.(1:24), 6, 4)
     @test DV.downsample(A, 10) === A                     # small enough: untouched
@@ -455,6 +486,31 @@ end
     @test mask[3][] isa Matrix{RGBA{Float32}}
 end
 
+@testset "value under the cursor" begin
+    rho = [10.0i + j for i in 1:6, j in 1:4]
+    v   = cat(fill(1.5, 6, 4), fill(-2.0, 6, 4); dims=3)
+    data = Dict{String,Any}("rho" => rho, "v" => v, "u" => rand(6))
+    cfg  = test_config(; heatmap="rho", overlays=[overlay(; field="v"), overlay()])
+    @test DV.cursor_text(data, cfg, Point2(3.2, 1.9)) == "x = 3, y = 2  ·  rho = 32.0  ·  v = (1.5, -2.0)"
+    @test DV.cursor_text(data, DV.with(cfg; Ndim="3D", zslice=7), Point2(1, 1)) ==
+          "x = 1, y = 1, z = 7  ·  rho = 11.0  ·  v = (1.5, -2.0)"
+    @test DV.cursor_text(data, cfg, Point2(0.2, 1)) == ""                 # outside the grid
+    @test DV.cursor_text(data, cfg, Point2(NaN, 1)) == ""
+    @test DV.cursor_text(data, DV.with(cfg; heatmap="u"), Point2(1, 1)) == ""   # 1D field
+    @test DV.fmt(1.3200001f-10) == "1.32e-10"                             # no Float32 noise
+
+    prof = Dict{String,Any}("a" => [1.0, 2.0, 3.0], "b" => [5.0, 6.0, 7.0])
+    c1   = test_config(; Ndim="1D", fields1d=["a", "b"], cut_axis="y")
+    @test DV.cursor_text_1d(prof, c1, 2.4) == "y = 2  ·  a = 2.0  ·  b = 6.0"
+    @test DV.cursor_text_1d(prof, c1, 9.0) == ""
+    @test DV.cursor_text_1d(prof, DV.with(c1; fields1d=String[]), 1.0) == ""
+
+    run = (fields=Dict("u" => [1.0 2.0; 3.0 4.0; 5.0 6.0]), names=["u"], times=[0.0, 10.0])
+    @test DV.cursor_text_run(run, "u", Point2(2, 8.0)) == "x = 2  ·  t = 10.0  ·  u = 4.0"
+    @test DV.cursor_text_run(run, "u", Point2(7, 0.0)) == ""
+    @test DV.cursor_text_run(run, "u", Point2(NaN, 0.0)) == ""
+end
+
 @testset "PNG lookup" begin
     root = make_dataset()
     dir  = datadir(root, "run_001")
@@ -496,4 +552,36 @@ end
     # Frames that cannot be drawn are counted, not fatal
     @test DV.save_frames(dir, test_config(; heatmap="not_a_field"), ".jld") == (0, 3)
     @test DV.save_frames(dir, test_config(; Ndim="4D"), ".jld") == (0, 3)
+end
+
+@testset "movie and PDF export" begin
+    root = make_dataset()
+    dir  = datadir(root, "run_001")
+    cfg  = test_config(; heatmap="v", overlays=[overlay(; field="v", alpha=0.5)])
+
+    @test DV.export_name(cfg) == "v_2D"
+    @test DV.export_name(DV.with(cfg; Ndim="3D", zslice=7)) == "v_3D_z7"
+    @test DV.export_name(test_config(; Ndim="1D", fields1d=["a", "b"], view1d="Times overlaid")) ==
+          "a-b_1D_Times-overlaid"
+
+    progress = Int[]
+    res = DV.save_movie((i, N) -> push!(progress, i), dir, cfg, ".jld"; framerate=5)
+    @test res.msg === nothing && isfile(res.file) && endswith(res.file, joinpath("Fig", "v_2D.mp4"))
+    @test filesize(res.file) > 1000 && progress == [1, 2, 3]
+
+    run = DV.save_movie(dir, test_config(; Ndim="1D", fields1d=["rho"], view1d="Kymograph"), ".jld")
+    @test isfile(run.file) && endswith(run.file, "rho_1D_Kymograph.mp4")
+    prof = DV.save_movie(dir, test_config(; Ndim="1D", fields1d=["rho"]), ".jld")
+    @test isfile(prof.file)
+
+    @test DV.save_movie(joinpath(root, "nope"), cfg, ".jld").msg == "No directory: $(joinpath(root, "nope"))"
+    @test DV.save_movie(dir, cfg, ".h5").msg == "No files in: $dir"
+    @test_throws Exception DV.save_movie(dir, DV.with(cfg; heatmap="not_a_field", overlays=DV.OverlayConfig[]), ".jld")
+    @test DV.save_movie(dir, DV.with(cfg; Ndim="4D"), ".jld").msg == "4D view not implemented yet"
+    @test DV.save_movie(dir, test_config(; Ndim="1D", fields1d=String[], view1d="Kymograph"), ".jld").msg ==
+          "No fields selected"
+
+    pdf = DV.save_frame_pdf(dir, DV.with(cfg; nfile=2), ".jld")
+    @test endswith(pdf.file, joinpath("Fig", "t0002_v_2D.pdf")) && String(read(pdf.file, 5)) == "%PDF-"
+    @test DV.save_frame_pdf(dir, DV.with(cfg; Ndim="4D"), ".jld").msg == "4D view not implemented yet"
 end

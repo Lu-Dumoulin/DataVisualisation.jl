@@ -34,6 +34,8 @@ function connect!(d::Dashboard)
     on(_ -> @async(reset_view!(d)),  s, d.reset.value)
     on(_ -> @async(save_all!(d)),    s, d.save.value)
     on(_ -> @async(toggle_png!(d)),  s, d.png.value)
+    on(_ -> @async(save_movie!(d)),  s, d.movie.value)
+    on(_ -> @async(save_pdf!(d)),    s, d.pdf.value)
 
     # Top bar follows the dimension, and in 1D the cut axis (slider length).
     # Rebuilding it may adjust selections silently (slice, cut position), so
@@ -87,10 +89,13 @@ function layout(d::Dashboard; width="100%", height="auto", scale=1.0)
 
     time_bar = Card(Col(
         Row("Time: ", Labeled(d.nfile, d.nfile.value),
-            d.player.button, "fps:", Labeled(d.player.fps, d.player.fps.value),
-            d.reset, d.save, d.png),
+            d.player.button, "fps:", Labeled(d.player.fps, d.player.fps.value)),
+        Row(d.reset, d.save, d.png, d.movie, d.pdf),
     ))
-    main = Observable{Any}(Col(Card(d.plot), time_bar))
+    cursor = DOM.div(d.cursor; style=Styles("font-family" => "Menlo, monospace", "font-size" => "12px",
+                                            "min-height" => "1.4em", "padding" => "0 12px",
+                                            "color" => "#333"))
+    main = Observable{Any}(Col(Card(d.plot), cursor, time_bar))
 
     grid = Grid(
         Card(Col(

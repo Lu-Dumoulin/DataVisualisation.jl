@@ -101,6 +101,7 @@ struct Dashboard
 
     # Stable widgets — created once, never rebuilt
     dim      ::Bonito.Dropdown
+    fixed_range ::Bonito.Checkbox                # heatmap colour range over the whole run
     fig_base ::Bonito.Slider{Int}
     nfile    ::Bonito.Slider{Int}
     params   ::Vector{Any}                       # sidebar: one widget per changing parameter
@@ -109,17 +110,21 @@ struct Dashboard
     reset    ::Bonito.Button
     save     ::Bonito.Button
     png      ::Bonito.Button
+    movie    ::Bonito.Button
+    pdf      ::Bonito.Button
     menus    ::Base.RefValue{FieldMenus}         # current field dropdowns
     zslider  ::Base.RefValue{Any}                # current 3D slice slider (or nothing)
     menus1d  ::Base.RefValue{Any}                # current 1D controls (NamedTuple) or nothing
     row      ::Base.RefValue{Int}                # DataFrame row of the current run
     live     ::Base.RefValue{Any}                # LiveFigure, LiveImage or nothing
     last_rebuild ::Base.RefValue{Float64}        # time of the last figure rebuild
+    exporting    ::Base.RefValue{Bool}           # an export (Save all .png, movie, PDF) is running
 
     # Outputs
     plot   ::Observable{Any}                     # Figure or message div
     top    ::Observable{Any}                     # top bar (depends on dimension)
     status ::Observable{Any}                     # save progress
+    cursor ::Observable{String}                  # value under the mouse
 
     # Background loops
     renderer ::Debouncer
@@ -157,6 +162,7 @@ function Dashboard(ws::DataWorkspace, session::Session)
         Ref(isnothing(shapes) ? Dict{String,Tuple}() : shapes),
 
         Bonito.Dropdown(["1D", "2D", "3D"]; index=all_1d(shapes) ? 1 : all_3d(shapes) ? 3 : 2),
+        Bonito.Checkbox(false; style=cb_style),
         Bonito.Slider(200:100:1600; value=800),
         Bonito.Slider(1:ws.Nfiles; value=1),
         filter(!isnothing, [make_widget_df(ws.tab_list[i], ws.df[1, ws.var_list[i]])
@@ -164,18 +170,22 @@ function Dashboard(ws::DataWorkspace, session::Session)
         [Bonito.Checkbox(false; style=cb_style) for _ in 1:ws.N_changing],
         Player(),
         Bonito.Button("↺ Reset";    style=button_style),
-        Bonito.Button("💾 Save all"; style=button_style),
+        Bonito.Button("💾 Save all .png"; style=button_style),
         Bonito.Button("🖼 Use PNG";  style=button_style),
+        Bonito.Button("🎞 Movie";    style=button_style),
+        Bonito.Button("📄 PDF";      style=button_style),
         Ref{FieldMenus}(),
         Ref{Any}(nothing),
         Ref{Any}(nothing),
         Ref(1),
         Ref{Any}(nothing),
         Ref(0.0),
+        Ref(false),
 
         Observable{Any}(DOM.div("Loading…")),
         Observable{Any}(DOM.div()),
         Observable{Any}(DOM.div("")),
+        Observable(""),
 
         Debouncer(),
         Debouncer(),
@@ -199,7 +209,8 @@ end
 # ── Reading state ─────────────────────────────────────────────────────────────
 
 # Single place that reads widget values into a PlotConfig.
-plot_config(d::Dashboard; nfile=d.nfile.value[]) = PlotConfig(;
+function plot_config(d::Dashboard; nfile=d.nfile.value[])
+    cfg = PlotConfig(;
     Ndim     = d.dim.value[],
     nfile    = Int(nfile),
     cmap     = d.colormap[],
@@ -212,11 +223,62 @@ plot_config(d::Dashboard; nfile=d.nfile.value[]) = PlotConfig(;
     cut_pos  = d.cut_pos[],
     cut_mean = d.cut_mean[],
     view1d   = d.view1d[],
-)
+    colorrange = nothing,
+    )
+    use_run_range(d, cfg) || return cfg
+    c = d.ws.run_ranges
+    r = lock(() -> get(c.values, range_key(d, cfg), nothing), c.lock)
+    return r isa Tuple ? with(cfg; colorrange=r) : cfg
+end
+
+# Colour range over the run: asked for, and meaningful (2D / 3D heatmaps).
+use_run_range(d::Dashboard, cfg) = d.fixed_range.value[] && cfg.Ndim in ("2D", "3D")
+
+# The frame count is part of the key: new frames of a running simulation → recomputed.
+range_key(d::Dashboard, cfg) =
+    (d.pathdir[], cfg.heatmap, cfg.Ndim, length(frame_files(d.pathdir[], d.ws.ext)))
+
+# Start computing the run range for cfg in the background (another thread when
+# Julia has several), unless it is cached or already being computed. Progress
+# and result go to the status line; when done, render again.
+function request_range!(d::Dashboard, cfg)
+    key = range_key(d, cfg)
+    c   = d.ws.run_ranges
+    lock(c.lock) do
+        (haskey(c.values, key) || haskey(c.tasks, key)) && return
+        dir, field, Ndim, n = key
+        done = Threads.Atomic{Int}(0)
+        task = Threads.@spawn run_range(dir, field, Ndim, d.ws.ext; progress=done)
+        c.tasks[key] = task
+        Base.errormonitor(@async begin
+            while !istaskdone(task)
+                d.status[] = DOM.div("Colour range of $field over the run: $(done[]) / $n frames…")
+                sleep(0.3)
+            end
+            r, err = try
+                fetch(task), nothing
+            catch e
+                cause = e isa TaskFailedException ? e.task.exception : e
+                nothing, first(split(sprint(showerror, cause), '\n'))
+            end
+            isnothing(err) || @warn "Colour range of $field failed: $err"
+            lock(c.lock) do
+                delete!(c.tasks, key)
+                c.values[key] = something(r, :none)          # :none — not retried for this key
+            end
+            d.status[] = DOM.div(
+                !isnothing(err) ? "⚠ Colour range of $field failed ($err): colour range per frame" :
+                isnothing(r)    ? "⚠ $field has no finite value: colour range per frame" :
+                                  "✓ Colour range of $field over the run: [$(fmt(r[1])), $(fmt(r[2]))]")
+            schedule!(d.renderer)
+        end)
+    end
+    return
+end
 
 plot_triggers(d::Dashboard) = Any[
     d.dim.value, d.nfile.value, d.fig_base.value, d.colormap, d.heatmap,
-    d.use_png, d.z, d.fields1d, d.cut_axis, d.cut_pos, d.cut_mean, d.view1d,                   # (pathdir renders via its own listener, after reload_keys!)
+    d.use_png, d.z, d.fields1d, d.cut_axis, d.cut_pos, d.cut_mean, d.view1d, d.fixed_range.value,                   # (pathdir renders via its own listener, after reload_keys!)
     Iterators.flatten(plot_triggers.(d.overlays))...,
 ]
 
@@ -226,6 +288,7 @@ plot_triggers(d::Dashboard) = Any[
 function render!(d::Dashboard)
     try
         cfg = plot_config(d)
+        use_run_range(d, cfg) && isnothing(cfg.colorrange) && request_range!(d, cfg)
         d.use_png[] ? render_png!(d, cfg) : render_fields!(d, cfg)
     catch e
         @warn "Render failed: $e"
@@ -238,6 +301,26 @@ end
 function show!(d::Dashboard, content)
     d.live[] = nothing
     d.plot[] = content
+    isempty(d.cursor[]) || (d.cursor[] = "")
+    return
+end
+
+# Value under the cursor. The browser forwards mouse moves to Julia; find the
+# axis under the mouse, convert to data coordinates and let `text_at(k, p)`
+# (k: index of that axis) read the value. Also refreshed when `triggers` change
+# (a new frame under a still mouse).
+function track_cursor!(d::Dashboard, fig, text_at, triggers...)
+    axs = [c for c in fig.content if c isa Makie.Axis]
+    isempty(axs) && return
+    function update(_...)
+        for (k, ax) in enumerate(axs)
+            Makie.is_mouseinside(ax.scene) || continue
+            d.cursor[] = text_at(k, Makie.mouseposition(ax.scene))
+            return
+        end
+        isempty(d.cursor[]) || (d.cursor[] = "")
+    end
+    onany(update, Makie.events(fig).mouseposition, triggers...)
     return
 end
 
@@ -248,7 +331,8 @@ function layout_key(cfg::PlotConfig, data)
     sizes = sort!([k => size(v) for (k, v) in data])
     cfg.Ndim == "1D" && return ("1D", cfg.fields1d, cfg.cut_axis, cfg.cut_mean, cfg.fig_base, sizes)
     overlays = [(o.field, o.alpha, o.stepp, o.nematic, o.color) for o in cfg.overlays]  # not arrowsize
-    return (cfg.Ndim, cfg.cmap, cfg.heatmap, overlays, cfg.fig_base, sizes)
+    run_range = !isnothing(cfg.colorrange)                    # the mode, not the values
+    return (cfg.Ndim, cfg.cmap, cfg.heatmap, overlays, cfg.fig_base, run_range, sizes)
 end
 
 # Wait before a rebuild (see REBUILD_SETTLE). false: the controls moved again
@@ -270,7 +354,8 @@ function render_fields!(d::Dashboard, cfg)
     key  = layout_key(cfg, data)
     live = d.live[]
     if live isa LiveFigure && live.key == key
-        live.style[].overlays != cfg.overlays && (live.style[] = cfg)   # arrow sizes, in place
+        s = live.style[]                        # arrow sizes, run colour range: in place
+        (s.overlays != cfg.overlays || s.colorrange != cfg.colorrange) && (live.style[] = cfg)
         live.data[] = data                      # in place: only arrays go to the browser
     else
         settle_before_rebuild(d) || return
@@ -280,6 +365,11 @@ function render_fields!(d::Dashboard, cfg)
         fig isa AbstractString && return show!(d, DOM.div(fig))
         show!(d, fig)
         d.live[] = LiveFigure(key, obs, style)
+        if cfg.Ndim == "1D"
+            track_cursor!(d, fig, (_, p) -> cursor_text_1d(obs[], plot_config(d), p[1]), obs)
+        else
+            track_cursor!(d, fig, (_, p) -> cursor_text(obs[], plot_config(d), p), obs)
+        end
     end
     return
 end
@@ -295,10 +385,14 @@ function render_run!(d::Dashboard, cfg)
     else
         settle_before_rebuild(d) || return
         frame = Observable(cfg.nfile)
-        fig   = plot_run(run_profiles(d.pathdir[], cfg, d.ws.ext), cfg; frame)
+        run   = run_profiles(d.pathdir[], cfg, d.ws.ext)
+        fig   = plot_run(run, cfg; frame)
         fig isa AbstractString && return show!(d, DOM.div(fig))
         show!(d, fig)
         d.live[] = LiveRun(key, frame)
+        kymo = cfg.view1d == "Kymograph"         # y is time there; overlaid: y is the value
+        track_cursor!(d, fig, (k, p) -> cursor_text_run(run, run.names[k],
+                      kymo ? p : (p[1], run.times[clamp(frame[], 1, length(run.times))])), frame)
     end
     return
 end
@@ -352,8 +446,43 @@ function reload_keys!(d::Dashboard, path)
     return
 end
 
+# Run one export at a time; a second click while one runs only says so.
+# Errors end up in the status line, not only in the terminal.
+function exclusive_export!(f, d::Dashboard)
+    d.exporting[] && return (d.status[] = DOM.div("An export is already running — wait for it to finish"); nothing)
+    d.exporting[] = true
+    try
+        f()
+    catch e
+        @warn "Export failed: $e"
+        d.status[] = DOM.div("⚠ Export failed: $e")
+    finally
+        d.exporting[] = false
+    end
+end
+
+# The current run as a movie, with the current view and settings, at the fps of the player.
+function save_movie!(d::Dashboard)
+    exclusive_export!(d) do
+        res = save_movie(d.pathdir[], plot_config(d), d.ws.ext; framerate=d.player.fps.value[]) do i, N
+            d.status[] = DOM.div("Recording movie: frame $i / $N…")
+        end
+        d.status[] = DOM.div(isnothing(res.file) ? res.msg : "✓ Movie saved to $(res.file)")
+    end
+end
+
+# The current frame as a PDF.
+function save_pdf!(d::Dashboard)
+    exclusive_export!(d) do
+        res = save_frame_pdf(d.pathdir[], plot_config(d), d.ws.ext)
+        d.status[] = DOM.div(isnothing(res.file) ? res.msg : "✓ PDF saved to $(res.file)")
+    end
+end
+
 # Export every frame of the current run as PNG with the current settings.
-function save_all!(d::Dashboard)
+save_all!(d::Dashboard) = exclusive_export!(() -> save_all_pngs!(d), d)
+
+function save_all_pngs!(d::Dashboard)
     path = d.pathdir[]
     cfg  = plot_config(d)        # snapshot: widget changes mid-save don't leak in
     saved, total = save_frames(path, cfg, d.ws.ext) do i, N
@@ -467,7 +596,8 @@ function field_menus_dom!(d::Dashboard, field_keys)
     return DOM.div(Row(
         Card(Col(
             Row("Heatmap: ",  menus.heatmap),
-            Row("Colormap: ", menus.colormap);
+            Row("Colormap: ", menus.colormap),
+            Row("Run range: ", d.fixed_range);
             gap="0px"
         )),
         [overlay_card("Overlay $i", menu, o)

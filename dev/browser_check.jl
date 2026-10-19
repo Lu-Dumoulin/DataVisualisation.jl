@@ -15,12 +15,16 @@
 #   play      press play for 10 s, report frames shown per second and
 #             whether WGLMakie recreated its canvas (it shouldn't, per frame).
 #             Optional 4th argument: fps slider value (1,2,4,8,12,24; default 4)
-#   png-play  same, in "Use PNG" mode (run Save all first)
+#   png-play  same, in "Use PNG" mode (run "Save all .png" first)
 #   3d        switch to 3D, show the first 3D field, drag the slice slider;
 #             reports whether slice changes update the figure in place
 #   drag      show the first vector field as Overlay 1, then drag its arrow-size
 #             slider fast (60 moves, 25 ms apart); reports renders, rebuilt
 #             canvases and browser errors
+#   hover     move the mouse over the plot (real browser mouse events) and read
+#             the value-under-cursor line; then play 2 s with the mouse still
+#   range     tick "Run range", play while the range is computed in the
+#             background; reports progress, the range and frames shown meanwhile
 #   1d        switch to 1D, move the 2D cut, switch its axis, play 3 s;
 #             reports whether the figure is updated in place
 #
@@ -43,7 +47,8 @@ t() = round(time() - T0; digits=1)
 
 # ── App, with a handle on the Dashboard and a render counter ──────────────────
 
-const ws      = DataWorkspace(CSV_PATH, ".jld")
+const EXT     = isempty(DV.get_all_dir_ext(dirname(CSV_PATH); ext=".jld")) ? ".jld2" : ".jld"
+const ws      = DataWorkspace(CSV_PATH, EXT)
 const DREF    = Ref{Any}(nothing)
 const RENDERS   = Float64[]                    # start time of each render
 const DURATIONS = Float64[]                    # how long each render took in Julia
@@ -145,6 +150,45 @@ HTTP.WebSockets.open(wsurl; suppress_close_error=true) do sock
             println("      Julia z=$(d.z[])  screenshot: ", shot("3_slice$z"))
         end
         println("      WGL canvas recreated while slicing: $(context_resets() - resets0)×")
+
+    elseif SCENARIO == "range"
+        d = DREF[]
+        renders0 = length(RENDERS)
+        js("""(() => { const rows = [...document.querySelectorAll('div')].filter(e =>
+            e.textContent.trim().startsWith('Run range:') && e.querySelector('input[type=checkbox]') &&
+            ![...e.children].some(c => c.textContent.trim().startsWith('Run range:')));
+            rows[0].querySelector('input[type=checkbox]').click() })()""")
+        click_button("▶")
+        t_tick = time()
+        status() = replace(string(d.status[]), r"<[^>]*>" => "")
+        while time() - t_tick < 120 && !startswith(status(), "✓")
+            println("$(t())s status: ", status(), "  (frame $(d.nfile.value[]))")
+            sleep(1)
+        end
+        println("$(t())s ", status(), " after $(round(time() - t_tick; digits=1)) s; ",
+                "$(length(RENDERS) - renders0) frames rendered meanwhile")
+        sleep(3); click_button("❚❚"); sleep(1)
+        live = d.live[]
+        println("      colorrange on screen: ", live isa DV.LiveFigure ? live.style[].colorrange : "?",
+                "  canvas recreated $(context_resets())× in total")
+        println("      screenshot: ", shot("2_range"))
+
+    elseif SCENARIO == "hover"
+        d = DREF[]
+        rect = js("""(() => { const c = [...document.querySelectorAll('canvas')].sort((a, b) =>
+            b.width * b.height - a.width * a.height)[0].getBoundingClientRect();
+            return [c.left, c.top, c.width, c.height] })()""")
+        move(fx, fy) = cdp("Input.dispatchMouseEvent", Dict("type" => "mouseMoved",
+                           "x" => rect[1] + fx * rect[3], "y" => rect[2] + fy * rect[4]))
+        for (fx, fy) in ((0.3, 0.5), (0.45, 0.45), (0.6, 0.3))
+            move(fx, fy); sleep(1.5)
+            println("$(t())s mouse at ($fx, $fy) of the canvas → \"$(d.cursor[])\"")
+        end
+        println("      screenshot: ", shot("2_hover"))
+        click_button("▶"); sleep(2); click_button("❚❚"); sleep(1)
+        println("$(t())s after playing, mouse still → \"$(d.cursor[])\" (frame $(d.nfile.value[]))")
+        move(0.99, 0.99); sleep(1.5)
+        println("$(t())s mouse outside the axis → \"$(d.cursor[])\"")
 
     elseif SCENARIO == "drag"
         d = DREF[]

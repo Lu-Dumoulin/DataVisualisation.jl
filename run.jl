@@ -1,4 +1,5 @@
-# Usage: julia run.jl            (from anywhere — always runs this checkout)
+# Usage: julia -t auto run.jl    (from anywhere — always runs this checkout;
+#        -t auto: background work such as the run colour range uses other threads)
 # In Pluto, the last expression returns the app for display.
 
 const IN_PLUTO = isdefined(Main, :PlutoRunner)

@@ -1,4 +1,4 @@
-# Usage: julia demo.jl [dims]       dims = 1, 2 (default) or 3
+# Usage: julia -t auto demo.jl [dims]       dims = 1, 2 (default) or 3
 # Generates the demo ensemble (see `demo_dataset`) in a temporary folder and
 # opens the dashboard on it — no simulation data needed.
 
