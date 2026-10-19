@@ -495,6 +495,35 @@ function save_all_pngs!(d::Dashboard)
     return
 end
 
+# ── Colormap choice, with Ludo's house rule ─────────────────────────────────
+# YlOrRd (and its _3 … _8 variants) is refused: a message, and RdPu_8 instead.
+# The swap happens before anything is drawn, so YlOrRd never reaches the screen.
+# YlOrRd_9 is tolerated.
+const BANNED_CMAP  = "YlOrRd"
+const ALLOWED_CMAP = "YlOrRd_9"
+const RESCUE_CMAP  = "RdPu_8"
+
+function choose_colormap!(d::Dashboard, name)
+    if startswith(name, BANNED_CMAP) && name != ALLOWED_CMAP
+        d.status[] = DOM.div("⛔ $name is a horrible colormap — only someone as twisted as Alberto " *
+                             "could like it. For your own good, switching to $RESCUE_CMAP.";
+                             style=Styles("color" => "#b0306a", "font-weight" => "600"))
+        name = RESCUE_CMAP
+        @async foreach(dd -> set_value!(dd, RESCUE_CMAP), colormap_dropdowns(d))   # the browser follows
+    end
+    d.colormap[] = name
+    return
+end
+
+# The colormap dropdowns currently on the page (2D/3D menus, 1D menus).
+function colormap_dropdowns(d::Dashboard)
+    dds = Bonito.Dropdown[]
+    isassigned(d.menus) && push!(dds, d.menus[].colormap)
+    m = d.menus1d[]
+    m isa NamedTuple && push!(dds, m.cmap)
+    return dds
+end
+
 function toggle_png!(d::Dashboard)
     d.use_png[]       = !d.use_png[]
     d.png.content[]   = d.use_png[] ? "⚙ Use Field" : "🖼 Use PNG"
@@ -588,7 +617,7 @@ function field_menus_dom!(d::Dashboard, field_keys)
     d.menus[] = menus
 
     on(v -> d.heatmap[]  = v, d.session, menus.heatmap.value)
-    on(v -> d.colormap[] = v, d.session, menus.colormap.value)
+    on(v -> choose_colormap!(d, v), d.session, menus.colormap.value)
     for (o, menu) in zip(d.overlays, menus.overlays)
         on(v -> o.field[] = v, d.session, menu.value)
     end
@@ -626,7 +655,7 @@ function menus_1d_dom!(d::Dashboard)
     view = Bonito.Dropdown(VIEWS_1D; index=something(findfirst(==(d.view1d[]), VIEWS_1D), 1))
     cmap = Bonito.Dropdown(d.ws.all_cmaps; index=findfirst(==(d.colormap[]), d.ws.all_cmaps))
     on(v -> d.view1d[]   = v, d.session, view.value)
-    on(v -> d.colormap[] = v, d.session, cmap.value)
+    on(v -> choose_colormap!(d, v), d.session, cmap.value)
     views = Card(Row("View: ", view, "Colormap (kymograph): ", cmap))
 
     n = cut_length(d.shapes[], d.cut_axis[])

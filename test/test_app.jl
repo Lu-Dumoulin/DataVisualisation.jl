@@ -569,6 +569,31 @@ end
     end
 end
 
+@testset "YlOrRd is refused" begin
+    with_dashboard() do d
+        d.menus[].colormap.value[] = "YlOrRd"
+        @test waitfor(() -> d.colormap[] == "RdPu_8")
+        @test occursin("Alberto", dom_text(d.status[])) && occursin("RdPu_8", dom_text(d.status[]))
+        @test waitfor(() -> d.menus[].colormap.value[] == "RdPu_8")          # the dropdown follows
+        @test waitfor(() -> plot_fig(d) !== nothing &&
+                            axis_of(plot_fig(d)).scene.plots[1].colormap[] == "RdPu_8")
+
+        d.menus[].colormap.value[] = "viridis"                              # others are fine
+        @test waitfor(() -> d.colormap[] == "viridis")
+
+        d.dim.value[] = "1D"                                                # the 1D menu too, and variants
+        @test waitfor(() -> d.menus1d[] !== nothing)
+        d.menus1d[].cmap.value[] = "YlOrRd_5"
+        @test waitfor(() -> d.colormap[] == "RdPu_8" && d.menus1d[].cmap.value[] == "RdPu_8")
+        @test occursin("YlOrRd_5 is a horrible colormap", dom_text(d.status[]))
+
+        d.menus1d[].cmap.value[] = "YlOrRd_9"                               # …except YlOrRd_9
+        @test waitfor(() -> d.colormap[] == "YlOrRd_9")
+        sleep(0.5)
+        @test d.colormap[] == "YlOrRd_9" && d.menus1d[].cmap.value[] == "YlOrRd_9"
+    end
+end
+
 @testset "player never skips a frame" begin
     with_dashboard() do d
         shown = Int[]

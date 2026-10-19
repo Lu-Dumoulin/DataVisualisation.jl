@@ -25,6 +25,7 @@
 #             the value-under-cursor line; then play 2 s with the mouse still
 #   range     tick "Run range", play while the range is computed in the
 #             background; reports progress, the range and frames shown meanwhile
+#   ylorrd    pick the YlOrRd colormap (refused: message, back to RdPu_8)
 #   1d        switch to 1D, move the 2D cut, switch its axis, play 3 s;
 #             reports whether the figure is updated in place
 #
@@ -150,6 +151,12 @@ HTTP.WebSockets.open(wsurl; suppress_close_error=true) do sock
             println("      Julia z=$(d.z[])  screenshot: ", shot("3_slice$z"))
         end
         println("      WGL canvas recreated while slicing: $(context_resets() - resets0)×")
+
+    elseif SCENARIO == "ylorrd"
+        select_option("YlOrRd"); sleep(4)
+        d = DREF[]
+        println("$(t())s colormap = $(d.colormap[]); status: ", replace(string(d.status[]), r"<[^>]*>" => ""))
+        state("after YlOrRd"); println("      screenshot: ", shot("2_ylorrd"))
 
     elseif SCENARIO == "range"
         d = DREF[]
